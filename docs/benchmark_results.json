@@ -1,0 +1,293 @@
+{
+  "summary": {
+    "attacks": 15,
+    "unprotected_attacks_succeeded": 15,
+    "seatbelt_attacks_succeeded": 0,
+    "unprotected_total_lost": "25473.32",
+    "seatbelt_total_lost": "0",
+    "benign_checks": 5,
+    "benign_passed": 5
+  },
+  "attacks": [
+    {
+      "id": "A01",
+      "name": "Payee swap",
+      "category": "destination",
+      "unprotected": {
+        "lost": "50.00",
+        "moved": "50.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "0",
+        "outcomes": {
+          "denied": 1
+        }
+      }
+    },
+    {
+      "id": "A02",
+      "name": "Look-alike payees",
+      "category": "destination",
+      "unprotected": {
+        "lost": "60.00",
+        "moved": "60.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "0",
+        "outcomes": {
+          "denied": 6
+        }
+      }
+    },
+    {
+      "id": "A03",
+      "name": "Amount inflation",
+      "category": "amount",
+      "unprotected": {
+        "lost": "10000.00",
+        "moved": "10000.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "0",
+        "outcomes": {
+          "denied": 1
+        }
+      }
+    },
+    {
+      "id": "A04",
+      "name": "One cent over the limit",
+      "category": "amount",
+      "unprotected": {
+        "lost": "100.01",
+        "moved": "100.01"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "0",
+        "outcomes": {
+          "denied": 1
+        }
+      }
+    },
+    {
+      "id": "A05",
+      "name": "Rounding exploit",
+      "category": "amount",
+      "unprotected": {
+        "lost": "100.01",
+        "moved": "100.01"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "0",
+        "outcomes": {
+          "denied": 1
+        }
+      }
+    },
+    {
+      "id": "A06",
+      "name": "Absurd amounts",
+      "category": "amount",
+      "unprotected": {
+        "lost": "5000.00",
+        "moved": "5000.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "0",
+        "outcomes": {
+          "rejected:validation": 3,
+          "denied": 1
+        }
+      }
+    },
+    {
+      "id": "A07",
+      "name": "Salami slicing",
+      "category": "budget",
+      "unprotected": {
+        "lost": "1698.30",
+        "moved": "1998.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "299.70",
+        "outcomes": {
+          "paid": 24,
+          "held": 6,
+          "denied": 170,
+          "[rubber-stamp human approved 6 held payments]": 1
+        }
+      }
+    },
+    {
+      "id": "A08",
+      "name": "Concurrent overspend",
+      "category": "budget",
+      "unprotected": {
+        "lost": "1500.00",
+        "moved": "1800.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "300.00",
+        "outcomes": {
+          "paid": 8,
+          "held": 2,
+          "denied": 50,
+          "[rubber-stamp human approved 2 held payments]": 1
+        }
+      }
+    },
+    {
+      "id": "A09",
+      "name": "Replay (same request)",
+      "category": "replay",
+      "unprotected": {
+        "lost": "270.00",
+        "moved": "300.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "30.00",
+        "outcomes": {
+          "paid": 10
+        }
+      }
+    },
+    {
+      "id": "A10",
+      "name": "Replay with escalating amounts",
+      "category": "replay",
+      "unprotected": {
+        "lost": "225.00",
+        "moved": "245.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "20.00",
+        "outcomes": {
+          "paid": 1,
+          "rejected:IdempotencyConflictError": 9
+        }
+      }
+    },
+    {
+      "id": "A11",
+      "name": "Expired permission",
+      "category": "time",
+      "unprotected": {
+        "lost": "60.00",
+        "moved": "60.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "0",
+        "outcomes": {
+          "rejected:MandateExpiredError": 3
+        }
+      }
+    },
+    {
+      "id": "A12",
+      "name": "Pay after the kill switch",
+      "category": "time",
+      "unprotected": {
+        "lost": "100.00",
+        "moved": "120.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "20.00",
+        "outcomes": {
+          "paid": 1,
+          "rejected:MandateRevokedError": 5
+        }
+      }
+    },
+    {
+      "id": "A13",
+      "name": "Forged credentials",
+      "category": "identity",
+      "unprotected": {
+        "lost": "2000.00",
+        "moved": "2000.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "0",
+        "outcomes": {
+          "rejected:MandateSignatureError": 2,
+          "rejected:MalformedMandateError": 2
+        }
+      }
+    },
+    {
+      "id": "A14",
+      "name": "Wrong currency",
+      "category": "amount",
+      "unprotected": {
+        "lost": "40.00",
+        "moved": "40.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "0",
+        "outcomes": {
+          "denied": 2
+        }
+      }
+    },
+    {
+      "id": "A15",
+      "name": "Approval flood",
+      "category": "availability",
+      "unprotected": {
+        "lost": "4270.00",
+        "moved": "4540.00"
+      },
+      "seatbelt": {
+        "lost": "0",
+        "moved": "270.00",
+        "outcomes": {
+          "held": 6,
+          "denied": 95,
+          "[a legitimate 40.00 payment afterwards: denied]": 1,
+          "[rubber-stamp human approved 6 held payments]": 1
+        }
+      }
+    }
+  ],
+  "legitimate_use": [
+    {
+      "check": "10 routine purchases within limits are all paid",
+      "passed": true,
+      "detail": "10/10 paid"
+    },
+    {
+      "check": "a large purchase waits for a human, then pays",
+      "passed": true,
+      "detail": "held, then captured after approval"
+    },
+    {
+      "check": "a rejected purchase is not paid and frees its budget",
+      "passed": true,
+      "detail": "held 90.00, rejected, budget back to 0"
+    },
+    {
+      "check": "a retried request pays exactly once",
+      "passed": true,
+      "detail": "3 identical requests -> 1 transfer"
+    },
+    {
+      "check": "a mixed honest-and-hostile session moves no unauthorised money",
+      "passed": true,
+      "detail": "0 unauthorised transfers after a mixed session"
+    }
+  ]
+}
