@@ -296,3 +296,126 @@ def test_list_payments_filters_and_orders_newest_first(store, mandate):
         b.payment_id
     ]
     assert store.list_payments(mandate_id="other") == []
+
+
+def test_awaiting_payer_status_holds_mandate_budget():
+    from seatbelt.store.models import HOLDING_STATUSES, PaymentStatus
+
+    assert PaymentStatus.AWAITING_PAYER in HOLDING_STATUSES
+
+# ---------------- PayPal checkout lifecycle ----------------
+
+PAYPAL_APPROVE_URL = (
+    "https://www.sandbox.paypal.com/checkoutnow?token=ORDER123"
+)
+
+
+def test_attach_checkout_moves_payment_to_awaiting_payer(store, mandate):
+    p = submit(store, mandate, amount="30")
+
+    checkout = store.attach_checkout(
+        p.payment_id,
+        "ORDER123",
+        PAYPAL_APPROVE_URL,
+        now=NOW,
+    )
+
+    assert checkout.status is PaymentStatus.AWAITING_PAYER
+    assert checkout.paypal_order_id == "ORDER123"
+    assert checkout.paypal_approve_url == PAYPAL_APPROVE_URL
+
+
+def test_awaiting_payer_payment_remains_in_budget(store, mandate):
+    p = submit(store, mandate, amount="30")
+
+    store.attach_checkout(
+        p.payment_id,
+        "ORDER123",
+        PAYPAL_APPROVE_URL,
+        now=NOW,
+    )
+
+    assert store.get_mandate(mandate.mandate_id).committed == D("30")
+
+
+@pytest.mark.parametrize(
+    "bad_url",
+    [
+        "http://www.sandbox.paypal.com/checkoutnow?token=ORDER123",
+        "https://evil.example/checkoutnow?token=ORDER123",
+        "https://www.sandbox.paypal.com.evil.example/checkoutnow",
+        "https://www.sandbox.paypal.com/not-checkout",
+        "javascript:alert(1)",
+    ],
+)
+def test_attach_checkout_rejects_untrusted_approval_urls(store, mandate, bad_url):
+    p = submit(store, mandate, amount="30")
+
+    with pytest.raises(ValueError):
+        store.attach_checkout(
+            p.payment_id,
+            "ORDER123",
+            bad_url,
+            now=NOW,
+        )
+
+    assert store.get_payment(p.payment_id).status is PaymentStatus.RESERVED
+
+
+def test_verified_payer_approval_returns_payment_to_reserved(store, mandate):
+    p = submit(store, mandate, amount="30")
+
+    store.attach_checkout(
+        p.payment_id,
+        "ORDER123",
+        PAYPAL_APPROVE_URL,
+        now=NOW,
+    )
+
+    approved = store.mark_payer_approved(p.payment_id, now=NOW)
+
+    assert approved.status is PaymentStatus.RESERVED
+    assert approved.paypal_order_id == "ORDER123"
+    assert approved.paypal_approve_url == PAYPAL_APPROVE_URL
+    assert store.get_mandate(mandate.mandate_id).committed == D("30")
+
+
+def test_revoking_mandate_cancels_awaiting_payer_checkout(store, mandate):
+    p = submit(store, mandate, amount="30")
+
+    store.attach_checkout(
+        p.payment_id,
+        "ORDER123",
+        PAYPAL_APPROVE_URL,
+        now=NOW,
+    )
+
+    cancelled = store.revoke_mandate(
+        mandate.mandate_id,
+        "admin",
+        now=NOW,
+    )
+
+    assert cancelled == 1
+    assert store.get_payment(p.payment_id).status is PaymentStatus.CANCELLED
+    assert store.get_mandate(mandate.mandate_id).committed == 0
+
+
+def test_payer_approval_after_mandate_expiry_cancels_payment(store, mandate):
+    p = submit(store, mandate, amount="30")
+
+    store.attach_checkout(
+        p.payment_id,
+        "ORDER123",
+        PAYPAL_APPROVE_URL,
+        now=NOW,
+    )
+
+    with pytest.raises(MandateExpiredError):
+        store.mark_payer_approved(
+            p.payment_id,
+            now=NOW + timedelta(hours=2),
+        )
+
+    assert store.get_payment(p.payment_id).status is PaymentStatus.CANCELLED
+    assert store.get_mandate(mandate.mandate_id).committed == 0

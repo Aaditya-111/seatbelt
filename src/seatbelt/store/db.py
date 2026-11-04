@@ -14,7 +14,7 @@ from pathlib import Path
 
 from seatbelt.errors import StoreError
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS mandates (
@@ -41,6 +41,7 @@ CREATE TABLE IF NOT EXISTS payments (
     verdict           TEXT NOT NULL,
     reasons           TEXT NOT NULL,
     paypal_order_id   TEXT,
+    paypal_approve_url TEXT,
     paypal_capture_id TEXT,
     decided_by        TEXT,
     failure           TEXT,
@@ -86,30 +87,61 @@ class Database:
         conn.execute(f"PRAGMA busy_timeout = {int(self._busy_timeout_ms)}")
         return conn
 
+
     def initialize(self) -> None:
-        """Create tables if needed. Safe to call on every start."""
+        """Create tables and apply safe, versioned schema migrations."""
         conn = self._connect()
         try:
             version = conn.execute("PRAGMA user_version").fetchone()[0]
+
             if version > SCHEMA_VERSION:
                 raise StoreError(
                     f"database schema v{version} is newer than this code (v{SCHEMA_VERSION})"
                 )
+
+            # Create missing tables. Existing tables are left untouched.
             conn.executescript(SCHEMA)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+
+            # Upgrade existing v1 databases without deleting their data.
+            conn.execute("BEGIN IMMEDIATE")
+            try:
+                columns = {
+                    row["name"]
+                    for row in conn.execute(
+                        "PRAGMA table_info(payments)"
+                    ).fetchall()
+                }
+
+                if "paypal_approve_url" not in columns:
+                    conn.execute(
+                        "ALTER TABLE payments ADD COLUMN paypal_approve_url TEXT"
+                    )
+
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+                conn.execute("COMMIT")
+
+            except BaseException:
+                if conn.in_transaction:
+                    conn.execute("ROLLBACK")
+                raise
+
         finally:
             conn.close()
 
     @contextmanager
-    def transaction(self, *, write: bool = True) -> Iterator[sqlite3.Connection]:
+    def transaction(
+        self, *, write: bool = True
+    ) -> Iterator[sqlite3.Connection]:
         conn = self._connect()
         try:
             conn.execute("BEGIN IMMEDIATE" if write else "BEGIN")
             yield conn
             conn.execute("COMMIT")
+
         except BaseException:
             if conn.in_transaction:
                 conn.execute("ROLLBACK")
             raise
+
         finally:
             conn.close()

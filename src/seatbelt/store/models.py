@@ -12,22 +12,27 @@ from seatbelt.mandate.models import Mandate
 from seatbelt.policy.models import Reason, Verdict
 
 
+
 class PaymentStatus(str, Enum):
     DENIED = "denied"  # blocked by policy; nothing reserved
     PENDING_APPROVAL = "pending_approval"  # waiting for a human; budget is held
-    RESERVED = "reserved"  # cleared to pay; budget is held
+    RESERVED = "reserved"  # cleared for payment execution; budget is held
+    AWAITING_PAYER = "awaiting_payer"  # PayPal order created; buyer approval pending
     CAPTURED = "captured"  # money moved
     REJECTED = "rejected"  # a human said no; budget released
-    FAILED = "failed"  # PayPal step failed; budget released
-    CANCELLED = "cancelled"  # mandate revoked/expired; budget released
+    FAILED = "failed"  # payment definitively failed; budget released
+    CANCELLED = "cancelled"  # mandate revoked/expired or checkout cancelled
 
 
 # Statuses whose amount counts against the mandate's budget.
+
 HOLDING_STATUSES = (
     PaymentStatus.PENDING_APPROVAL,
     PaymentStatus.RESERVED,
+    PaymentStatus.AWAITING_PAYER,
     PaymentStatus.CAPTURED,
 )
+
 
 
 class PaymentRecord(BaseModel):
@@ -45,6 +50,7 @@ class PaymentRecord(BaseModel):
     verdict: Verdict
     reasons: tuple[Reason, ...]
     paypal_order_id: str | None = None
+    paypal_approve_url: str | None = None
     paypal_capture_id: str | None = None
     decided_by: str | None = None
     failure: str | None = None

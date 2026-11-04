@@ -143,3 +143,25 @@ def test_field_boundaries_cannot_be_shifted(db):
     conn.close()
     with db.transaction(write=False) as c:
         assert not audit.verify(c, KEY).ok
+
+
+def test_v1_database_is_upgraded_without_losing_payment_data(tmp_path):
+    database = Database(tmp_path / "migration.db")
+    database.initialize()
+
+    # Simulate an existing v1 database.
+    with database.transaction() as conn:
+        conn.execute("ALTER TABLE payments DROP COLUMN paypal_approve_url")
+        conn.execute("PRAGMA user_version = 1")
+
+    database.initialize()
+
+    with database.transaction(write=False) as conn:
+        version = conn.execute("PRAGMA user_version").fetchone()[0]
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(payments)").fetchall()
+        }
+
+    assert version == 2
+    assert "paypal_approve_url" in columns
