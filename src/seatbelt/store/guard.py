@@ -65,13 +65,10 @@ from seatbelt.store.db import Database
 from seatbelt.store.models import (
 
     HOLDING_STATUSES,
-
     ChainStatus,
-
+    PaymentChannel,
     PaymentRecord,
-
     PaymentStatus,
-
     StoredMandate,
 
 )
@@ -137,6 +134,8 @@ def _to_record(row: sqlite3.Row) -> PaymentRecord:
         verdict=Verdict(row["verdict"]),
 
         reasons=tuple(Reason.model_validate(r) for r in json.loads(row["reasons"])),
+
+        payment_channel=PaymentChannel(row["payment_channel"]),
 
         paypal_order_id=row["paypal_order_id"],
 
@@ -257,7 +256,20 @@ class GuardStore:
                 f"(allowed from: {', '.join(sorted(s.value for s in allowed))})"
 
             )
+    
+    @staticmethod
 
+    def _require_channel(
+        row: sqlite3.Row,
+        expected: PaymentChannel,
+        action: str,
+    ) -> None:
+       actual = PaymentChannel(row["payment_channel"])
+       if actual is not expected:
+        raise InvalidTransitionError(
+            f"cannot {action} a {actual.value} payment through "
+            f"the {expected.value} execution path"
+        )
     @staticmethod
 
     def _update(
@@ -492,7 +504,7 @@ class GuardStore:
 
     def submit_payment(
 
-        self, mandate: Mandate, request: PaymentRequest, *, now: datetime | None = None
+        self, mandate: Mandate, request: PaymentRequest, *, payment_channel: PaymentChannel | str = PaymentChannel.EXECUTOR, now: datetime | None = None,
 
     ) -> PaymentRecord:
 
@@ -503,6 +515,11 @@ class GuardStore:
         """
 
         now = _now(now)
+
+        try:
+            payment_channel = PaymentChannel(payment_channel)
+        except ValueError:
+            raise ValueError("unsupported payment channel") from None
 
         with self._db.transaction() as conn:
 
@@ -539,6 +556,10 @@ class GuardStore:
                     and Decimal(existing["amount"]) == request.charge_amount
 
                     and existing["currency"] == request.money.currency
+
+                    and PaymentChannel(existing["payment_channel"])
+                     
+                    is payment_channel
 
                 )
 
@@ -650,7 +671,7 @@ class GuardStore:
 
     def approve_payment(
 
-        self, payment_id: str, approver: str, *, now: datetime | None = None
+        self, payment_id: str, approver: str, *,  expected_channel: PaymentChannel = PaymentChannel.EXECUTOR, now: datetime | None = None
 
     ) -> PaymentRecord:
 
@@ -667,6 +688,8 @@ class GuardStore:
         with self._db.transaction() as conn:
 
             row = self._load_payment(conn, payment_id)
+
+            self._require_channel(row, expected_channel, "approve")
 
             self._require_status(row, {PaymentStatus.PENDING_APPROVAL}, "approve")
 
@@ -758,7 +781,7 @@ class GuardStore:
 
     def attach_order(
 
-        self, payment_id: str, order_id: str, *, now: datetime | None = None
+        self, payment_id: str, order_id: str, *,  now: datetime | None = None
 
     ) -> PaymentRecord:
 
