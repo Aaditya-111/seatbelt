@@ -263,3 +263,316 @@ def test_simultaneous_distinct_requests_never_overspend(tmp_path):
 
 def test_executor_error_type_is_exported_for_implementers():
     assert issubclass(ExecutionError, Exception)
+
+
+from seatbelt.paypal.models import CaptureResult, Order, OrderPurchaseUnit
+
+
+class FakePayPal:
+    """In-memory PayPal simulator for service lifecycle tests."""
+
+    def __init__(
+        self,
+        *,
+        merchant_id="MERCHANT-1",
+        amount="20.00",
+        currency="USD",
+        reference_id=None,
+        lose_capture_response=False,
+    ):
+        self.merchant_id = merchant_id
+        self.amount = Decimal(amount)
+        self.currency = currency
+        self.reference_override = reference_id
+        self.reference_id = None
+        self.lose_capture_response = lose_capture_response
+        self.created = []
+        self.captured = []
+        self.get_calls = 0
+        self.completed = False
+        self.order_status = "APPROVED"
+        self.order_id = "ORDER-TEST-1"
+        self.capture_id = "CAPTURE-TEST-1"
+
+    def create_order(self, money, *, description, reference_id, request_id=None):
+        self.created.append(request_id)
+        self.reference_id = reference_id
+        return Order(
+            id=self.order_id,
+            status="PAYER_ACTION_REQUIRED",
+            approve_url="https://www.sandbox.paypal.com/checkoutnow?token=ORDER-TEST-1",
+            purchase_units=(
+                OrderPurchaseUnit(
+                    reference_id=reference_id,
+                    amount=Decimal(money.to_paypal_value()),
+                    currency_code=money.currency,
+                    merchant_id=self.merchant_id,
+                ),
+            ),
+        )
+
+    def get_order(self, order_id):
+        assert order_id == self.order_id
+        self.get_calls += 1
+
+        return Order(
+            id=self.order_id,
+            status="COMPLETED" if self.completed else self.order_status,
+            purchase_units=(
+                OrderPurchaseUnit(
+                    reference_id=self.reference_override or self.reference_id,
+                    amount=self.amount,
+                    currency_code=self.currency,
+                    merchant_id=self.merchant_id,
+                    capture_id=self.capture_id if self.completed else None,
+                    capture_amount=self.amount if self.completed else None,
+                    capture_currency=self.currency if self.completed else None,
+                ),
+            ),
+        )
+
+    def capture_order(self, order_id, *, request_id=None):
+        assert order_id == self.order_id
+        self.captured.append(request_id)
+        self.completed = True
+
+        if self.lose_capture_response:
+            self.lose_capture_response = False
+            raise RuntimeError("simulated lost capture response")
+
+        return CaptureResult(
+            order_id=self.order_id,
+            status="COMPLETED",
+            capture_id=self.capture_id,
+            amount=self.amount,
+            currency=self.currency,
+        )
+
+
+def build_paypal(tmp_path, paypal=None, name="paypal.db"):
+    paypal = paypal or FakePayPal()
+    db = Database(tmp_path / name)
+    db.initialize()
+    clock = Clock()
+    svc = GuardService(
+        GuardStore(db, KEY),
+        FakeExecutor(),
+        KEY,
+        max_mandate_ttl=timedelta(hours=24),
+        clock=clock,
+        paypal_client=paypal,
+        paypal_expected_merchant_id="MERCHANT-1",
+    )
+    return svc, paypal, clock
+
+
+def submit_paypal(svc, token, request_id="paypal-r1", amount="20"):
+    return svc.submit_paypal_payment(
+        token,
+        request_id=request_id,
+        payee="shop-a",
+        amount=amount,
+        currency="USD",
+        description="Test purchase",
+    )
+
+
+def test_paypal_payment_creates_checkout_and_persists_order(tmp_path):
+    svc, paypal, _ = build_paypal(tmp_path)
+    _, token = issue(svc)
+
+    payment = submit_paypal(svc, token)
+
+    assert payment.status is PaymentStatus.AWAITING_PAYER
+    assert payment.payment_channel.value == "paypal"
+    assert payment.paypal_order_id == paypal.order_id
+    assert payment.paypal_approve_url.startswith(
+        "https://www.sandbox.paypal.com/checkoutnow"
+    )
+    assert len(paypal.created) == 1
+    assert paypal.created[0]
+
+
+def test_paypal_return_verifies_order_and_captures_once(tmp_path):
+    svc, paypal, _ = build_paypal(tmp_path)
+    _, token = issue(svc)
+    payment = submit_paypal(svc, token)
+
+    completed = svc.process_paypal_return(paypal.order_id)
+
+    assert completed.status is PaymentStatus.CAPTURED
+    assert completed.paypal_capture_id == paypal.capture_id
+    assert len(paypal.captured) == 1
+    assert paypal.captured[0]
+
+
+def test_duplicate_paypal_return_does_not_capture_twice(tmp_path):
+    svc, paypal, _ = build_paypal(tmp_path)
+    _, token = issue(svc)
+    payment = submit_paypal(svc, token)
+
+    first = svc.process_paypal_return(paypal.order_id)
+    second = svc.process_paypal_return(paypal.order_id)
+
+    assert first.status is second.status is PaymentStatus.CAPTURED
+    assert first.payment_id == second.payment_id == payment.payment_id
+    assert len(paypal.captured) == 1
+
+
+def test_concurrent_paypal_returns_capture_only_once(tmp_path):
+    svc, paypal, _ = build_paypal(tmp_path)
+    _, token = issue(svc)
+    payment = submit_paypal(svc, token)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(
+            pool.map(
+                lambda _: svc.process_paypal_return(paypal.order_id),
+                range(8),
+            )
+        )
+
+    assert all(r.payment_id == payment.payment_id for r in results)
+    assert all(r.status is PaymentStatus.CAPTURED for r in results)
+    assert len(paypal.captured) == 1
+
+
+def test_paypal_capture_timeout_is_reconciled_without_second_capture(tmp_path):
+    paypal = FakePayPal(lose_capture_response=True)
+    svc, paypal, _ = build_paypal(tmp_path, paypal)
+    _, token = issue(svc)
+    payment = submit_paypal(svc, token)
+
+    with pytest.raises(RuntimeError, match="lost capture response"):
+        svc.process_paypal_return(paypal.order_id)
+
+    stuck = svc.get_payment(payment.payment_id)
+    assert stuck.status is PaymentStatus.RESERVED
+
+    recovered = svc.retry_payment(payment.payment_id)
+
+    assert recovered.status is PaymentStatus.CAPTURED
+    assert recovered.paypal_capture_id == paypal.capture_id
+    assert len(paypal.captured) == 1
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"merchant_id": "ATTACKER-MERCHANT"},
+        {"amount": "999.00"},
+        {"currency": "EUR"},
+        {"reference_id": "another-payment"},
+    ],
+)
+def test_paypal_order_tampering_is_rejected_before_capture(tmp_path, overrides):
+    paypal = FakePayPal(**overrides)
+    svc, paypal, _ = build_paypal(tmp_path, paypal)
+    _, token = issue(svc)
+    payment = submit_paypal(svc, token)
+
+    with pytest.raises(ValueError):
+        svc.process_paypal_return(paypal.order_id)
+
+    unchanged = svc.get_payment(payment.payment_id)
+    assert unchanged.status is PaymentStatus.AWAITING_PAYER
+    assert paypal.captured == []
+
+
+def test_paypal_callback_cannot_resolve_an_unknown_order(tmp_path):
+    svc, paypal, _ = build_paypal(tmp_path)
+
+    with pytest.raises(Exception):
+        svc.process_paypal_return("UNKNOWN-ORDER")
+
+    assert paypal.get_calls == 0
+
+
+def test_paypal_retries_reuse_stable_request_ids(tmp_path):
+    paypal = FakePayPal(lose_capture_response=True)
+    svc, paypal, _ = build_paypal(tmp_path, paypal)
+    _, token = issue(svc)
+    payment = submit_paypal(svc, token)
+
+    with pytest.raises(RuntimeError):
+        svc.process_paypal_return(paypal.order_id)
+
+    svc.retry_payment(payment.payment_id)
+
+    assert len(paypal.created) == 1
+    assert len(paypal.captured) == 1
+
+
+# ---------------- PayPal cancellation lifecycle ----------------
+
+def test_paypal_cancel_verifies_created_order_and_releases_payment(tmp_path):
+    svc, paypal, _ = build_paypal(tmp_path)
+    _, token = issue(svc)
+    payment = submit_paypal(svc, token)
+    paypal.order_status = "CREATED"
+
+    cancelled = svc.process_paypal_cancel(paypal.order_id)
+
+    assert cancelled.payment_id == payment.payment_id
+    assert cancelled.status is PaymentStatus.CANCELLED
+    assert paypal.get_calls == 1
+    assert paypal.captured == []
+    assert svc.verify_audit().ok
+
+
+def test_duplicate_paypal_cancel_is_idempotent(tmp_path):
+    svc, paypal, _ = build_paypal(tmp_path)
+    _, token = issue(svc)
+    payment = submit_paypal(svc, token)
+    paypal.order_status = "CREATED"
+
+    first = svc.process_paypal_cancel(paypal.order_id)
+    second = svc.process_paypal_cancel(paypal.order_id)
+
+    assert first.status is second.status is PaymentStatus.CANCELLED
+    assert first.payment_id == second.payment_id == payment.payment_id
+    assert paypal.get_calls == 1
+    assert paypal.captured == []
+
+
+@pytest.mark.parametrize("order_status", ["APPROVED", "COMPLETED"])
+def test_paypal_cancel_rejects_approved_or_completed_order(tmp_path, order_status):
+    svc, paypal, _ = build_paypal(tmp_path)
+    _, token = issue(svc)
+    payment = submit_paypal(svc, token)
+    paypal.order_status = order_status
+    if order_status == "COMPLETED":
+        paypal.completed = True
+
+    with pytest.raises(ValueError, match="cancellable"):
+        svc.process_paypal_cancel(paypal.order_id)
+
+    unchanged = svc.get_payment(payment.payment_id)
+    assert unchanged.status is PaymentStatus.AWAITING_PAYER
+    assert paypal.captured == []
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"merchant_id": "ATTACKER-MERCHANT"},
+        {"amount": "999.00"},
+        {"currency": "EUR"},
+        {"reference_id": "another-payment"},
+    ],
+)
+def test_paypal_cancel_rejects_tampered_order_before_releasing_payment(
+    tmp_path, overrides
+):
+    paypal = FakePayPal(**overrides)
+    svc, paypal, _ = build_paypal(tmp_path, paypal)
+    _, token = issue(svc)
+    payment = submit_paypal(svc, token)
+    paypal.order_status = "CREATED"
+
+    with pytest.raises(ValueError):
+        svc.process_paypal_cancel(paypal.order_id)
+
+    unchanged = svc.get_payment(payment.payment_id)
+    assert unchanged.status is PaymentStatus.AWAITING_PAYER
+    assert paypal.captured == []

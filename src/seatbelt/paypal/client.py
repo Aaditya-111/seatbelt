@@ -17,6 +17,7 @@ from collections.abc import Callable
 from typing import Any
 
 import httpx
+import re
 
 from seatbelt.config import Settings
 from seatbelt.errors import PayPalAuthError, PayPalError
@@ -27,6 +28,7 @@ log = logging.getLogger(__name__)
 _RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
 _TOKEN_EXPIRY_SKEW_SECONDS = 60
 _MAX_BACKOFF_SECONDS = 8.0
+_SAFE_ORDER_ID = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
 
 class PayPalClient:
@@ -197,11 +199,26 @@ class PayPalClient:
             self._request("POST", "/v2/checkout/orders", json=body, request_id=request_id)
         )
 
-    def get_order(self, order_id: str) -> Order:
-        return Order.from_api(self._request("GET", f"/v2/checkout/orders/{order_id}"))
+    @staticmethod
+    def _validate_order_id(order_id: str) -> None:
+        if not _SAFE_ORDER_ID.fullmatch(order_id):
+            raise ValueError("Invalid PayPal order ID")
 
-    def capture_order(self, order_id: str, *, request_id: str | None = None) -> CaptureResult:
+    def get_order(self, order_id: str) ->Order:
+        self._validate_order_id(order_id)
+        return Order.from_api(
+            self._request("GET",f"/v2/checkout/orders/{order_id}")
+        )
+    def capture_order(
+        self,
+        order_id: str,
+        *,
+        request_id: str | None = None,
+    ) -> CaptureResult:
+        self._validate_order_id(order_id)
         body = self._request(
-            "POST", f"/v2/checkout/orders/{order_id}/capture", request_id=request_id
+            "POST",
+            f"/v2/checkout/orders/{order_id}/capture",
+            request_id=request_id,
         )
         return CaptureResult.from_api(body)

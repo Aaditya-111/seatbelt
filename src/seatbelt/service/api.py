@@ -168,6 +168,35 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
             description=body.description,
         )
 
+    @app.post("/v1/paypal/payments", response_model=PaymentRecord, tags=["agent"])
+    def submit_paypal_payment(body: PaymentBody, creds: Creds) -> PaymentRecord:
+        if creds is None:
+            raise _unauthorized("mandate token required")
+
+        return service.submit_paypal_payment(
+            creds.credentials,
+            request_id=body.request_id,
+            payee=body.payee,
+            amount=body.amount,
+            currency=body.currency,
+            description=body.description,
+        )
+
+    @app.get("/v1/paypal/return", response_model=PaymentRecord, tags=["paypal"])
+    def paypal_return(
+        token: Annotated[str, Query(min_length=1, max_length=128)]
+    ) -> PaymentRecord:
+        # PayPal's token is an untrusted order ID until checked against our DB
+        # and verified with PayPal's Orders API.
+        return service.process_paypal_return(token)
+
+    @app.get("/v1/paypal/cancel", response_model=PaymentRecord, tags=["paypal"])
+    def paypal_cancel(
+        token: Annotated[str, Query(min_length=1, max_length=128)]
+    ) -> PaymentRecord:
+        # The order ID is untrusted until resolved from our DB and verified with PayPal.
+        return service.process_paypal_cancel(token)
+
     @app.get("/v1/payments/{payment_id}", response_model=PaymentRecord, tags=["agent", "admin"])
     def get_payment(
         payment_id: str, who: Annotated[Mandate | None, Depends(admin_or_agent)]

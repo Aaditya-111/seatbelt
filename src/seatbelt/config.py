@@ -27,6 +27,11 @@ class Settings(BaseSettings):
     paypal_client_secret: SecretStr
     paypal_env: Literal["sandbox", "live"] = "sandbox"
     allow_live: bool = False
+    paypal_expected_merchant_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+    )
 
     paypal_return_url: AnyHttpUrl
     paypal_cancel_url: AnyHttpUrl
@@ -60,6 +65,15 @@ class Settings(BaseSettings):
         if len(v.get_secret_value()) < 24:
             raise ValueError("ADMIN_API_KEY must be at least 24 characters")
         return v
+    @field_validator("paypal_expected_merchant_id")
+    @classmethod
+    def _clean_paypal_merchant_id(cls, v: str | None) -> str | None:
+        if v is None:
+            return None
+        value = v.strip()
+        if not value:
+            raise ValueError("PAYPAL_EXPECTED_MERCHANT_ID cannot be blank")
+        return value
 
     @model_validator(mode="after")
     def _keys_must_differ(self) -> Settings:
@@ -75,6 +89,7 @@ class Settings(BaseSettings):
                 "really intend to move real money."
             )
         return self
+
 
     @property
     def paypal_base_url(self) -> str:

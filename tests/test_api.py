@@ -421,6 +421,7 @@ def test_openapi_document_lists_paypal_endpoints(client):
 
     assert "/v1/paypal/payments" in paths
     assert "/v1/paypal/return" in paths
+    assert "/v1/paypal/cancel" in paths
 
 
 # ---------------- PayPal API lifecycle ----------------
@@ -436,6 +437,7 @@ class APIFakePayPal:
         self.created = []
         self.captured = []
         self.completed = False
+        self.order_status = "APPROVED"
 
     def create_order(self, money, *, description, reference_id, request_id=None):
         self.reference_id = reference_id
@@ -465,7 +467,7 @@ class APIFakePayPal:
 
         return Order(
             id=self.order_id,
-            status="COMPLETED" if self.completed else "APPROVED",
+            status="COMPLETED" if self.completed else self.order_status,
             purchase_units=(
                 OrderPurchaseUnit(
                     reference_id=self.reference_id,
@@ -587,6 +589,73 @@ def test_paypal_api_rejects_wrong_merchant_without_capture(tmp_path):
 
     response = client.get(
         "/v1/paypal/return",
+        params={"token": paypal.order_id},
+    )
+
+    assert response.status_code == 500
+    assert paypal.captured == []
+
+
+def test_paypal_api_cancel_releases_unapproved_checkout(tmp_path):
+    paypal = APIFakePayPal()
+    paypal.order_status = "CREATED"
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    response = client.get(
+        "/v1/paypal/cancel",
+        params={"token": paypal.order_id},
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json()["status"] == "cancelled"
+    assert response.json()["payment_id"] == checkout.json()["payment_id"]
+    assert paypal.captured == []
+
+
+def test_duplicate_paypal_api_cancellation_is_idempotent(tmp_path):
+    paypal = APIFakePayPal()
+    paypal.order_status = "CREATED"
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    first = client.get(
+        "/v1/paypal/cancel",
+        params={"token": paypal.order_id},
+    )
+    second = client.get(
+        "/v1/paypal/cancel",
+        params={"token": paypal.order_id},
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["status"] == "cancelled"
+    assert second.json()["status"] == "cancelled"
+    assert paypal.captured == []
+
+
+def test_paypal_api_does_not_cancel_approved_order(tmp_path):
+    paypal = APIFakePayPal()
+    paypal.order_status = "APPROVED"
+    client = make_client(
+        tmp_path,
+        paypal=paypal,
+        raise_exceptions=False,
+    )
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    response = client.get(
+        "/v1/paypal/cancel",
         params={"token": paypal.order_id},
     )
 

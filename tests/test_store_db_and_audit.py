@@ -167,3 +167,307 @@ def test_v1_database_is_upgraded_without_losing_payment_data(tmp_path):
     assert "paypal_approve_url" in columns
     assert "payment_channel" in columns
     assert "paypal_approve_url" in columns
+from datetime import timedelta
+from decimal import Decimal
+
+from seatbelt.errors import InvalidTransitionError, NotFoundError
+from seatbelt.policy import PaymentRequest
+from seatbelt.paypal.models import Money
+from seatbelt.service import FakeExecutor, GuardService
+from seatbelt.store import GuardStore, PaymentChannel
+
+
+def test_paypal_checkout_is_persisted_and_resolved_by_order_id(db):
+    store, payment = make_paypal_store_payment(db)
+
+    updated = store.attach_checkout(
+        payment.payment_id,
+        "ORDER-STORE-1",
+        "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-STORE-1",
+        now=T,
+    )
+
+    assert updated.status.value == "awaiting_payer"
+    assert updated.paypal_order_id == "ORDER-STORE-1"
+    assert updated.paypal_approve_url.endswith("token=ORDER-STORE-1")
+
+    resolved = store.get_payment_by_order_id("ORDER-STORE-1")
+    assert resolved.payment_id == payment.payment_id
+    assert resolved.payment_channel is PaymentChannel.PAYPAL
+
+
+def test_unknown_paypal_order_lookup_raises_not_found(db):
+    store, _ = make_paypal_store_payment(db)
+
+    with pytest.raises(NotFoundError):
+        store.get_payment_by_order_id("UNKNOWN-ORDER")
+
+
+@pytest.mark.parametrize(
+    "approve_url",
+    [
+        "http://www.sandbox.paypal.com/checkoutnow?token=ORDER-1",
+        "https://evil.example/checkoutnow?token=ORDER-1",
+        "https://www.paypal.com.evil.example/checkoutnow?token=ORDER-1",
+        "https://www.paypal.com/not-checkout?token=ORDER-1",
+        "https://user:password@www.paypal.com/checkoutnow?token=ORDER-1",
+        "javascript:alert(1)",
+    ],
+)
+def test_attach_checkout_rejects_untrusted_approval_urls(db, approve_url):
+    store, payment = make_paypal_store_payment(db)
+
+    with pytest.raises(ValueError, match="invalid PayPal approval URL"):
+        store.attach_checkout(
+            payment.payment_id,
+            "ORDER-INVALID-URL",
+            approve_url,
+            now=T,
+        )
+
+
+def test_paypal_checkout_rejects_duplicate_attachment(db):
+    store, payment = make_paypal_store_payment(db)
+
+    store.attach_checkout(
+        payment.payment_id,
+        "ORDER-FIRST",
+        "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-FIRST",
+        now=T,
+    )
+
+    with pytest.raises(InvalidTransitionError):
+        store.attach_checkout(
+            payment.payment_id,
+            "ORDER-SECOND",
+            "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-SECOND",
+            now=T,
+        )
+
+
+def test_paypal_payment_requires_approval_before_capture(db):
+    store, payment = make_paypal_store_payment(db)
+
+    store.attach_checkout(
+        payment.payment_id,
+        "ORDER-LIFECYCLE",
+        "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-LIFECYCLE",
+        now=T,
+    )
+
+    with pytest.raises(InvalidTransitionError):
+        store.mark_captured(
+            payment.payment_id,
+            "CAPTURE-TOO-EARLY",
+            now=T,
+        )
+
+    approved = store.mark_payer_approved(payment.payment_id, now=T)
+    assert approved.status.value == "reserved"
+
+    captured = store.mark_captured(
+        payment.payment_id,
+        "CAPTURE-LIFECYCLE",
+        now=T,
+    )
+
+    assert captured.status.value == "captured"
+    assert captured.paypal_capture_id == "CAPTURE-LIFECYCLE"
+
+
+def test_paypal_payer_approval_cannot_be_recorded_twice(db):
+    store, payment = make_paypal_store_payment(db)
+
+    store.attach_checkout(
+        payment.payment_id,
+        "ORDER-APPROVAL-ONCE",
+        "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-APPROVAL-ONCE",
+        now=T,
+    )
+
+    store.mark_payer_approved(payment.payment_id, now=T)
+
+    with pytest.raises(InvalidTransitionError):
+        store.mark_payer_approved(payment.payment_id, now=T)
+from datetime import timedelta
+from decimal import Decimal
+
+from seatbelt.errors import InvalidTransitionError, NotFoundError
+from seatbelt.policy import PaymentRequest
+from seatbelt.service import FakeExecutor, GuardService
+from seatbelt.store import GuardStore, PaymentChannel
+
+
+def make_paypal_store_payment(db, request_id="paypal-store-1"):
+    signing_key = "k" * 40
+    store = GuardStore(db, signing_key)
+
+    service = GuardService(
+        store,
+        FakeExecutor(),
+        signing_key,
+        max_mandate_ttl=timedelta(hours=24),
+        clock=lambda: T,
+    )
+
+    mandate, _ = service.issue_mandate(
+        agent_id="agent-store-test",
+        currency="USD",
+        per_payment_limit="100",
+        total_limit="300",
+        approval_threshold="40",
+        allowed_payees=["shop-a"],
+        ttl=timedelta(hours=1),
+    )
+
+    request = PaymentRequest(
+        request_id=request_id,
+        agent_id="agent-store-test",
+        payee="shop-a",
+        money=Money(amount=Decimal("20.00"), currency="USD"),
+    )
+
+    payment = store.submit_payment(
+        mandate,
+        request,
+        payment_channel=PaymentChannel.PAYPAL,
+        now=T,
+    )
+
+    assert payment.status.value == "reserved"
+    return store, payment
+
+
+# ---------------- PayPal checkout persistence and lifecycle ----------------
+
+def test_paypal_checkout_is_persisted_and_resolved_by_order_id(db):
+    store, payment = make_paypal_store_payment(db)
+
+    updated = store.attach_checkout(
+        payment.payment_id,
+        "ORDER-STORE-1",
+        "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-STORE-1",
+        now=T,
+    )
+
+    assert updated.status.value == "awaiting_payer"
+    assert updated.paypal_order_id == "ORDER-STORE-1"
+    assert updated.paypal_approve_url.endswith("token=ORDER-STORE-1")
+
+    resolved = store.get_payment_by_order_id("ORDER-STORE-1")
+    assert resolved.payment_id == payment.payment_id
+    assert resolved.payment_channel is PaymentChannel.PAYPAL
+
+
+def test_unknown_paypal_order_lookup_raises_not_found(db):
+    store, _ = make_paypal_store_payment(db)
+
+    with pytest.raises(NotFoundError):
+        store.get_payment_by_order_id("UNKNOWN-ORDER")
+
+
+@pytest.mark.parametrize(
+    "approve_url",
+    [
+        "http://www.sandbox.paypal.com/checkoutnow?token=ORDER-1",
+        "https://evil.example/checkoutnow?token=ORDER-1",
+        "https://www.paypal.com.evil.example/checkoutnow?token=ORDER-1",
+        "https://www.paypal.com/not-checkout?token=ORDER-1",
+        "https://user:password@www.paypal.com/checkoutnow?token=ORDER-1",
+        "javascript:alert(1)",
+    ],
+)
+def test_attach_checkout_rejects_untrusted_approval_urls(db, approve_url):
+    store, payment = make_paypal_store_payment(db)
+
+    with pytest.raises(ValueError, match="invalid PayPal approval URL"):
+        store.attach_checkout(
+            payment.payment_id,
+            "ORDER-INVALID-URL",
+            approve_url,
+            now=T,
+        )
+
+
+def test_paypal_checkout_rejects_duplicate_attachment(db):
+    store, payment = make_paypal_store_payment(db)
+
+    store.attach_checkout(
+        payment.payment_id,
+        "ORDER-FIRST",
+        "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-FIRST",
+        now=T,
+    )
+
+    with pytest.raises(InvalidTransitionError):
+        store.attach_checkout(
+            payment.payment_id,
+            "ORDER-SECOND",
+            "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-SECOND",
+            now=T,
+        )
+
+
+def test_paypal_payment_requires_approval_before_capture(db):
+    store, payment = make_paypal_store_payment(db)
+
+    store.attach_checkout(
+        payment.payment_id,
+        "ORDER-LIFECYCLE",
+        "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-LIFECYCLE",
+        now=T,
+    )
+
+    with pytest.raises(InvalidTransitionError):
+        store.mark_captured(
+            payment.payment_id,
+            "CAPTURE-TOO-EARLY",
+            now=T,
+        )
+
+    approved = store.mark_payer_approved(payment.payment_id, now=T)
+    assert approved.status.value == "reserved"
+
+    captured = store.mark_captured(
+        payment.payment_id,
+        "CAPTURE-LIFECYCLE",
+        now=T,
+    )
+
+    assert captured.status.value == "captured"
+    assert captured.paypal_capture_id == "CAPTURE-LIFECYCLE"
+
+
+def test_paypal_payer_approval_cannot_be_recorded_twice(db):
+    store, payment = make_paypal_store_payment(db)
+
+    store.attach_checkout(
+        payment.payment_id,
+        "ORDER-APPROVAL-ONCE",
+        "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-APPROVAL-ONCE",
+        now=T,
+    )
+
+    store.mark_payer_approved(payment.payment_id, now=T)
+
+    with pytest.raises(InvalidTransitionError):
+        store.mark_payer_approved(payment.payment_id, now=T)
+
+
+def test_paypal_cancellation_marks_payment_cancelled(db):
+    store, payment = make_paypal_store_payment(db)
+
+    store.attach_checkout(
+        payment.payment_id,
+        "ORDER-CANCEL-STORE-1",
+        "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-CANCEL-STORE-1",
+        now=T,
+    )
+
+    cancelled = store.mark_paypal_cancelled(payment.payment_id, now=T)
+
+    assert cancelled.status.value == "cancelled"
+    assert cancelled.paypal_order_id == "ORDER-CANCEL-STORE-1"
+    assert store.get_payment_by_order_id(
+        "ORDER-CANCEL-STORE-1"
+    ).status.value == "cancelled"

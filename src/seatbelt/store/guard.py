@@ -589,11 +589,10 @@ class GuardStore:
 
                 "INSERT INTO payments (payment_id, mandate_id, request_id, agent_id, payee, "
 
-                "amount, currency, description, status, verdict, reasons, created_at, "
+                "amount, currency, description, status, verdict, reasons, payment_channel, "
+                "created_at, updated_at) "
 
-                "updated_at) "
-
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 
                 (
 
@@ -618,6 +617,8 @@ class GuardStore:
                     decision.verdict.value,
 
                     json.dumps([r.model_dump(mode="json") for r in decision.reasons]),
+
+                                        payment_channel.value,
 
                     now.isoformat(),
 
@@ -981,6 +982,41 @@ class GuardStore:
 
         return record
 
+    def mark_paypal_cancelled(
+        self,
+        payment_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> PaymentRecord:
+        """Cancel an unapproved PayPal checkout and release its reservation."""
+        now = _now(now)
+
+        with self._db.transaction() as conn:
+            row = self._load_payment(conn, payment_id)
+            self._require_channel(row, PaymentChannel.PAYPAL, "cancel")
+            self._require_status(
+                row,
+                {PaymentStatus.AWAITING_PAYER},
+                "cancel PayPal checkout for",
+            )
+
+            updated = self._update(
+                conn,
+                payment_id,
+                now,
+                status=PaymentStatus.CANCELLED,
+                failure="PayPal checkout cancelled by payer",
+            )
+            self._log(
+                conn,
+                "payment.paypal_cancelled",
+                "system",
+                payment_id,
+                {"order_id": row["paypal_order_id"]},
+                now,
+            )
+            return _to_record(updated)
+
     def mark_captured(
 
         self, payment_id: str, capture_id: str, *, now: datetime | None = None
@@ -1044,6 +1080,17 @@ class GuardStore:
         with self._db.transaction(write=False) as conn:
 
             return _to_record(self._load_payment(conn, payment_id))
+
+    def get_payment_by_order_id(self, order_id: str) -> PaymentRecord:
+        """Resolve a PayPal callback using an order ID stored by Seatbelt."""
+        with self._db.transaction(write=False) as conn:
+            row = conn.execute(
+                "SELECT * FROM payments WHERE paypal_order_id = ?",
+                (order_id,),
+            ).fetchone()
+            if row is None:
+                raise NotFoundError("PayPal order not found")
+            return _to_record(row)
 
     def list_payments(
 
