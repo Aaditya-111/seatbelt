@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 
 import pytest
 from fastapi.testclient import TestClient
@@ -6,6 +7,7 @@ from pydantic import SecretStr
 
 from seatbelt.service import ExecutionResult, FakeExecutor, GuardService, create_app
 from seatbelt.store import Database, GuardStore
+from seatbelt.paypal.models import CaptureResult, Order, OrderPurchaseUnit
 
 SIGNING_KEY = "k" * 40
 ADMIN_KEY = "a" * 30
@@ -25,7 +27,7 @@ class ExplodingExecutor:
         raise RuntimeError("super secret internal detail")
 
 
-def make_client(tmp_path, executor=None, raise_exceptions=True):
+def make_client(tmp_path, executor=None, raise_exceptions=True, paypal=None):
     db = Database(tmp_path / "api.db")
     db.initialize()
     clock = Clock()
@@ -35,11 +37,14 @@ def make_client(tmp_path, executor=None, raise_exceptions=True):
         SIGNING_KEY,
         max_mandate_ttl=timedelta(hours=24),
         clock=clock,
+        paypal_client=paypal,
+        paypal_expected_merchant_id="MERCHANT-1" if paypal is not None else None,
     )
     app = create_app(service, SecretStr(ADMIN_KEY))
     client = TestClient(app, raise_server_exceptions=raise_exceptions)
     client.clock = clock
     client.executor = service._executor
+    client.paypal = paypal
     return client
 
 
@@ -372,3 +377,218 @@ def test_audit_log_lists_events_and_verifies(client):
     assert "payment.captured" in events and "mandate.registered" in events
     status = client.get("/v1/audit/verify", headers=ADMIN).json()
     assert status["ok"] is True and status["head_hash"] and status["entries"] >= 4
+# ---------------- PayPal API security boundaries ----------------
+
+def test_paypal_checkout_requires_agent_authentication(client):
+    r = client.post(
+        "/v1/paypal/payments",
+        json={
+            "request_id": "paypal-1",
+            "payee": "shop-a",
+            "amount": "20.00",
+            "currency": "USD",
+        },
+    )
+    assert r.status_code == 401
+
+
+def test_agent_cannot_select_paypal_channel_on_regular_payment_endpoint(client):
+    _, token = issue(client)
+
+    r = pay(
+        client,
+        token,
+        payment_channel="paypal",
+    )
+
+    assert r.status_code == 422
+
+
+def test_paypal_return_rejects_unknown_order_even_with_supplied_payment_id(client):
+    r = client.get(
+        "/v1/paypal/return",
+        params={
+            "token": "UNKNOWN-ORDER",
+            "payment_id": "some-other-payment",
+        },
+    )
+
+    assert r.status_code == 404
+
+
+def test_openapi_document_lists_paypal_endpoints(client):
+    paths = client.get("/openapi.json").json()["paths"]
+
+    assert "/v1/paypal/payments" in paths
+    assert "/v1/paypal/return" in paths
+
+
+# ---------------- PayPal API lifecycle ----------------
+
+class APIFakePayPal:
+    def __init__(self, merchant_id="MERCHANT-1"):
+        self.merchant_id = merchant_id
+        self.order_id = "ORDER-API-1"
+        self.capture_id = "CAPTURE-API-1"
+        self.reference_id = None
+        self.amount = None
+        self.currency = None
+        self.created = []
+        self.captured = []
+        self.completed = False
+
+    def create_order(self, money, *, description, reference_id, request_id=None):
+        self.reference_id = reference_id
+        self.amount = Decimal(money.to_paypal_value())
+        self.currency = money.currency
+        self.created.append(request_id)
+
+        return Order(
+            id=self.order_id,
+            status="PAYER_ACTION_REQUIRED",
+            approve_url=(
+                "https://www.sandbox.paypal.com/"
+                "checkoutnow?token=ORDER-API-1"
+            ),
+            purchase_units=(
+                OrderPurchaseUnit(
+                    reference_id=reference_id,
+                    amount=self.amount,
+                    currency_code=self.currency,
+                    merchant_id=self.merchant_id,
+                ),
+            ),
+        )
+
+    def get_order(self, order_id):
+        assert order_id == self.order_id
+
+        return Order(
+            id=self.order_id,
+            status="COMPLETED" if self.completed else "APPROVED",
+            purchase_units=(
+                OrderPurchaseUnit(
+                    reference_id=self.reference_id,
+                    amount=self.amount,
+                    currency_code=self.currency,
+                    merchant_id=self.merchant_id,
+                    capture_id=self.capture_id if self.completed else None,
+                    capture_amount=self.amount if self.completed else None,
+                    capture_currency=self.currency if self.completed else None,
+                ),
+            ),
+        )
+
+    def capture_order(self, order_id, *, request_id=None):
+        assert order_id == self.order_id
+        self.captured.append(request_id)
+        self.completed = True
+
+        return CaptureResult(
+            order_id=self.order_id,
+            status="COMPLETED",
+            capture_id=self.capture_id,
+            amount=self.amount,
+            currency=self.currency,
+        )
+
+
+def submit_paypal_api(client, token, request_id="api-paypal-1"):
+    return client.post(
+        "/v1/paypal/payments",
+        headers=bearer(token),
+        json={
+            "request_id": request_id,
+            "payee": "shop-a",
+            "amount": "20.00",
+            "currency": "USD",
+            "description": "API lifecycle test",
+        },
+    )
+
+
+def test_paypal_api_creates_authenticated_checkout_and_persists_order(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    response = submit_paypal_api(client, token)
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["status"] == "awaiting_payer"
+    assert body["payment_channel"] == "paypal"
+    assert body["paypal_order_id"] == paypal.order_id
+    assert body["paypal_approve_url"].startswith(
+        "https://www.sandbox.paypal.com/checkoutnow"
+    )
+    assert len(paypal.created) == 1
+    assert paypal.created[0]
+
+
+def test_paypal_api_return_verifies_and_captures_order(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    response = client.get(
+        "/v1/paypal/return",
+        params={"token": paypal.order_id},
+    )
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+
+    assert body["status"] == "captured"
+    assert body["paypal_capture_id"] == paypal.capture_id
+    assert len(paypal.captured) == 1
+    assert paypal.captured[0]
+
+
+def test_duplicate_paypal_api_returns_do_not_capture_twice(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    first = client.get(
+        "/v1/paypal/return",
+        params={"token": paypal.order_id},
+    )
+    second = client.get(
+        "/v1/paypal/return",
+        params={"token": paypal.order_id},
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["status"] == "captured"
+    assert second.json()["status"] == "captured"
+    assert len(paypal.captured) == 1
+
+
+def test_paypal_api_rejects_wrong_merchant_without_capture(tmp_path):
+    paypal = APIFakePayPal(merchant_id="ATTACKER-MERCHANT")
+    client = make_client(
+        tmp_path,
+        paypal=paypal,
+        raise_exceptions=False,
+    )
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    response = client.get(
+        "/v1/paypal/return",
+        params={"token": paypal.order_id},
+    )
+
+    assert response.status_code == 500
+    assert paypal.captured == []
