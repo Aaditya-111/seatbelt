@@ -187,7 +187,7 @@ class GuardService:
         return self._complete_paypal_payment(record.payment_id, order_id)
 
     def process_paypal_cancel(self, order_id: str) -> PaymentRecord:
-        """Verify PayPal's order state before cancelling an unapproved checkout."""
+        """Handle a PayPal cancel callback without assuming it voided the order."""
         record = self._store.get_payment_by_order_id(order_id)
 
         if record.payment_channel is not PaymentChannel.PAYPAL:
@@ -212,21 +212,38 @@ class GuardService:
 
             if current.status is not PaymentStatus.AWAITING_PAYER:
                 raise InvalidTransitionError(
-                    "only an unapproved PayPal checkout can be cancelled"
+                    "only an unapproved PayPal checkout can receive a cancel callback"
                 )
 
             order = self._paypal.get_order(order_id)
-            order.verify_for_cancellation(
-                expected_order_id=order_id,
-                expected_reference_id=current.payment_id,
-                expected_money=Money(
+
+            expected = {
+                "expected_order_id": order_id,
+                "expected_reference_id": current.payment_id,
+                "expected_money": Money(
                     amount=current.amount,
                     currency=current.currency,
                 ),
-                expected_merchant_id=self._paypal_merchant_id,
-            )
+                "expected_merchant_id": self._paypal_merchant_id,
+            }
 
-            return self._store.mark_paypal_cancelled(
+            # Verify order identity and payment details before trusting the callback.
+            order.verify_checkout_identity(**expected)
+
+            if order.status in {"APPROVED", "COMPLETED"}:
+                raise ValueError(
+                    "PayPal order is not in a cancellable state"
+                )
+
+            # Release the reservation only when PayPal independently reports VOIDED.
+            if order.status == "VOIDED":
+                return self._store.mark_paypal_cancelled(
+                    current.payment_id,
+                    now=self._clock(),
+                )
+
+            # A browser redirect is not proof that the PayPal order is cancelled.
+            return self._store.record_paypal_cancel_requested(
                 current.payment_id,
                 now=self._clock(),
             )

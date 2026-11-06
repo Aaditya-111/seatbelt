@@ -982,6 +982,51 @@ class GuardStore:
 
         return record
 
+    def record_paypal_cancel_requested(
+        self,
+        payment_id: str,
+        *,
+        now: datetime | None = None,
+    ) -> PaymentRecord:
+        """Record a browser cancellation request without releasing its reservation."""
+        now = _now(now)
+
+        with self._db.transaction() as conn:
+            row = self._load_payment(conn, payment_id)
+            self._require_channel(row, PaymentChannel.PAYPAL, "cancel")
+
+            if row["status"] == PaymentStatus.CANCELLED.value:
+                return _to_record(row)
+
+            self._require_status(
+                row,
+                {PaymentStatus.AWAITING_PAYER},
+                "request cancellation for",
+            )
+
+            existing = conn.execute(
+                """
+                SELECT 1
+                FROM audit_log
+                WHERE event = ?
+                  AND subject_id = ?
+                LIMIT 1
+                """,
+                ("payment.paypal_cancel_requested", payment_id),
+            ).fetchone()
+
+            if existing is None:
+                self._log(
+                    conn,
+                    "payment.paypal_cancel_requested",
+                    "system",
+                    payment_id,
+                    {"order_id": row["paypal_order_id"]},
+                    now,
+                )
+
+            return _to_record(row)
+
     def mark_paypal_cancelled(
         self,
         payment_id: str,

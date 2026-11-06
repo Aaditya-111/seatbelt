@@ -598,7 +598,7 @@ def test_paypal_api_rejects_wrong_merchant_without_capture(tmp_path):
 
 def test_paypal_api_cancel_releases_unapproved_checkout(tmp_path):
     paypal = APIFakePayPal()
-    paypal.order_status = "CREATED"
+    paypal.order_status = "VOIDED"
     client = make_client(tmp_path, paypal=paypal)
     _, token = issue(client)
 
@@ -618,7 +618,7 @@ def test_paypal_api_cancel_releases_unapproved_checkout(tmp_path):
 
 def test_duplicate_paypal_api_cancellation_is_idempotent(tmp_path):
     paypal = APIFakePayPal()
-    paypal.order_status = "CREATED"
+    paypal.order_status = "VOIDED"
     client = make_client(tmp_path, paypal=paypal)
     _, token = issue(client)
 
@@ -659,5 +659,6 @@ def test_paypal_api_does_not_cancel_approved_order(tmp_path):
         params={"token": paypal.order_id},
     )
 
-    assert response.status_code == 500
+    assert response.status_code == 409
+    assert response.json()["detail"] == "PayPal order is not in a cancellable state"
     assert paypal.captured == []

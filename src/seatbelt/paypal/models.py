@@ -1,4 +1,4 @@
-﻿"""Typed request/response models for the PayPal calls we use."""
+"""Typed request/response models for the PayPal calls we use."""
 
 from __future__ import annotations
 
@@ -115,6 +115,41 @@ class Order(BaseModel):
                 "Unexpected PayPal order response"
             ) from exc
 
+    def verify_checkout_identity(
+        self,
+        *,
+        expected_order_id: str,
+        expected_reference_id: str,
+        expected_money: Money,
+        expected_merchant_id: str,
+    ) -> None:
+        """Verify checkout identity and money without assuming its lifecycle state."""
+        if not expected_merchant_id or not expected_merchant_id.strip():
+            raise ValueError("Expected PayPal merchant ID is not configured")
+
+        if self.id != expected_order_id:
+            raise ValueError("PayPal order ID does not match the stored order")
+
+        if len(self.purchase_units) != 1:
+            raise ValueError("PayPal order must contain exactly one purchase unit")
+
+        unit = self.purchase_units[0]
+
+        if unit.reference_id != expected_reference_id:
+            raise ValueError("PayPal purchase reference does not match the payment")
+
+        if unit.amount is None or unit.currency_code is None:
+            raise ValueError("PayPal order is missing its purchase amount")
+
+        if unit.amount != Decimal(expected_money.to_paypal_value()):
+            raise ValueError("PayPal order amount does not match the authorized amount")
+
+        if unit.currency_code != expected_money.currency:
+            raise ValueError("PayPal order currency does not match the authorized currency")
+
+        if unit.merchant_id != expected_merchant_id:
+            raise ValueError("PayPal merchant ID does not match the configured merchant")
+
     def verify_for_cancellation(
         self,
         *,
@@ -123,28 +158,16 @@ class Order(BaseModel):
         expected_money: Money,
         expected_merchant_id: str,
     ) -> None:
-        """Verify an unapproved PayPal order before releasing its reservation."""
-        if self.id != expected_order_id:
-            raise ValueError("PayPal order ID does not match the stored order")
+        """Verify that PayPal confirms the order is voided before releasing funds."""
+        self.verify_checkout_identity(
+            expected_order_id=expected_order_id,
+            expected_reference_id=expected_reference_id,
+            expected_money=expected_money,
+            expected_merchant_id=expected_merchant_id,
+        )
 
-        if self.status not in {"CREATED", "VOIDED"}:
-            raise ValueError("PayPal order is not in a cancellable state")
-
-        if len(self.purchase_units) != 1:
-            raise ValueError("PayPal order must contain exactly one purchase unit")
-
-        unit = self.purchase_units[0]
-        if unit.reference_id != expected_reference_id:
-            raise ValueError("PayPal purchase reference does not match the payment")
-
-        if unit.amount != Decimal(expected_money.to_paypal_value()):
-            raise ValueError("PayPal order amount does not match the authorized amount")
-
-        if unit.currency_code != expected_money.currency:
-            raise ValueError("PayPal order currency does not match the authorized currency")
-
-        if not expected_merchant_id or unit.merchant_id != expected_merchant_id:
-            raise ValueError("PayPal merchant ID does not match the configured merchant")
+        if self.status != "VOIDED":
+            raise ValueError("PayPal order is not in a terminal cancelled state")
 
     def verify_for_capture(
         self,

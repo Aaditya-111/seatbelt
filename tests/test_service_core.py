@@ -509,7 +509,7 @@ def test_paypal_cancel_verifies_created_order_and_releases_payment(tmp_path):
     svc, paypal, _ = build_paypal(tmp_path)
     _, token = issue(svc)
     payment = submit_paypal(svc, token)
-    paypal.order_status = "CREATED"
+    paypal.order_status = "VOIDED"
 
     cancelled = svc.process_paypal_cancel(paypal.order_id)
 
@@ -524,7 +524,7 @@ def test_duplicate_paypal_cancel_is_idempotent(tmp_path):
     svc, paypal, _ = build_paypal(tmp_path)
     _, token = issue(svc)
     payment = submit_paypal(svc, token)
-    paypal.order_status = "CREATED"
+    paypal.order_status = "VOIDED"
 
     first = svc.process_paypal_cancel(paypal.order_id)
     second = svc.process_paypal_cancel(paypal.order_id)
@@ -576,3 +576,28 @@ def test_paypal_cancel_rejects_tampered_order_before_releasing_payment(
     unchanged = svc.get_payment(payment.payment_id)
     assert unchanged.status is PaymentStatus.AWAITING_PAYER
     assert paypal.captured == []
+
+def test_paypal_cancel_callback_keeps_reservation_when_order_is_not_voided(tmp_path):
+    svc, paypal, _ = build_paypal(tmp_path)
+    _, token = issue(svc)
+    payment = submit_paypal(svc, token)
+
+    paypal.order_status = "PAYER_ACTION_REQUIRED"
+
+    first = svc.process_paypal_cancel(paypal.order_id)
+    second = svc.process_paypal_cancel(paypal.order_id)
+
+    assert first.status is PaymentStatus.AWAITING_PAYER
+    assert second.status is PaymentStatus.AWAITING_PAYER
+    assert first.payment_id == second.payment_id == payment.payment_id
+    assert paypal.get_calls == 2
+    assert paypal.captured == []
+    assert svc.verify_audit().ok
+
+    events = svc._store.list_audit(limit=500)
+    cancellation_events = [
+        event for event in events
+        if event["event"] == "payment.paypal_cancel_requested"
+        and event["subject_id"] == payment.payment_id
+    ]
+    assert len(cancellation_events) == 1

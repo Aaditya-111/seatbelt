@@ -194,9 +194,11 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
     def paypal_cancel(
         token: Annotated[str, Query(min_length=1, max_length=128)]
     ) -> PaymentRecord:
-        # The order ID is untrusted until resolved from our DB and verified with PayPal.
-        return service.process_paypal_cancel(token)
-
+          # The order ID is untrusted until resolved from our DB and verified with PayPal.
+          try:
+             return service.process_paypal_cancel(token)
+          except ValueError as exc:
+             raise HTTPException(status_code=409, detail=str(exc)) from exc
     @app.get("/v1/payments/{payment_id}", response_model=PaymentRecord, tags=["agent", "admin"])
     def get_payment(
         payment_id: str, who: Annotated[Mandate | None, Depends(admin_or_agent)]
