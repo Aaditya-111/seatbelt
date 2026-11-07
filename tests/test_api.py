@@ -95,6 +95,48 @@ def corrupt_latest_audit_hash(client):
         )
 
 
+def rollback_latest_audit_entry(client):
+    with client.store._db.transaction(write=True) as conn:
+        conn.execute(
+            """
+            DELETE FROM audit_log
+            WHERE seq = (SELECT MAX(seq) FROM audit_log)
+            """
+        )
+
+
+def make_checkpointed_client(tmp_path, paypal):
+    checkpoint = tmp_path / "audit-checkpoint.json"
+    db = Database(tmp_path / "checkpoint-api.db")
+    db.initialize()
+    clock = Clock()
+    store = GuardStore(
+        db,
+        SIGNING_KEY,
+        audit_checkpoint_path=str(checkpoint),
+    )
+    service = GuardService(
+        store,
+        FakeExecutor(),
+        SIGNING_KEY,
+        max_mandate_ttl=timedelta(hours=24),
+        clock=clock,
+        paypal_client=paypal,
+        paypal_expected_merchant_id="MERCHANT-1",
+    )
+    app = create_app(service, SecretStr(ADMIN_KEY))
+    client = TestClient(app, raise_server_exceptions=False)
+    client.clock = clock
+    client.executor = service._executor
+    client.paypal = paypal
+    client.store = store
+
+    # Bootstrap a trusted genesis checkpoint before the first audit write.
+    store.create_audit_checkpoint()
+
+    return client, checkpoint
+
+
 # ---------------- basics ----------------
 def test_health_needs_no_credentials(client):
     r = client.get("/health")
@@ -423,6 +465,62 @@ def test_checkpoint_endpoint_requires_configured_path(client):
 
 
 # ---------------- audit ----------------
+
+def test_checkpoint_rollback_blocks_paypal_checkout_api(tmp_path):
+    paypal = APIFakePayPal()
+    client, checkpoint = make_checkpointed_client(tmp_path, paypal)
+    _, token = issue(client)
+
+    client.store.create_audit_checkpoint()
+    assert checkpoint.exists()
+
+    rollback_latest_audit_entry(client)
+
+    response = submit_paypal_api(
+        client,
+        token,
+        request_id="checkpoint-rollback-checkout",
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json() == {
+        "detail": "Payment operations are temporarily disabled due to an integrity check failure."
+    }
+    assert paypal.created == []
+    assert paypal.captured == []
+    status = client.store.verify_audit()
+    assert status.ok is False
+    assert status.checkpoint_ok is False
+
+
+def test_checkpoint_rollback_blocks_paypal_capture_api(tmp_path):
+    paypal = APIFakePayPal()
+    client, checkpoint = make_checkpointed_client(tmp_path, paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+    assert len(paypal.created) == 1
+
+    client.store.create_audit_checkpoint()
+    assert checkpoint.exists()
+
+    rollback_latest_audit_entry(client)
+
+    response = client.get(
+        "/v1/paypal/return",
+        params={"token": paypal.order_id},
+    )
+
+    assert response.status_code == 503, response.text
+    assert response.json() == {
+        "detail": "Payment operations are temporarily disabled due to an integrity check failure."
+    }
+    assert paypal.captured == []
+    status = client.store.verify_audit()
+    assert status.ok is False
+    assert status.checkpoint_ok is False
+
 
 def test_paypal_checkout_requires_agent_authentication(client):
     r = client.post(
