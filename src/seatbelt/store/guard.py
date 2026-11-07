@@ -1063,34 +1063,54 @@ class GuardStore:
             return _to_record(updated)
 
     def mark_captured(
-
-        self, payment_id: str, capture_id: str, *, now: datetime | None = None
-
+        self,
+        payment_id: str,
+        capture_id: str,
+        *,
+        now: datetime | None = None,
     ) -> PaymentRecord:
+      now = _now(now)
+      capture_id = _external_id(capture_id, "PayPal capture id")
 
-        now = _now(now)
+      with self._db.transaction() as conn:
+          row = self._load_payment(conn, payment_id)
 
-        capture_id = _external_id(capture_id, "PayPal capture id")
-
-        with self._db.transaction() as conn:
-
-            row = self._load_payment(conn, payment_id)
-
-            self._require_status(row, {PaymentStatus.RESERVED}, "capture")
-
-            updated = self._update(
-
-                conn, payment_id, now, status=PaymentStatus.CAPTURED, paypal_capture_id=capture_id
-
+            # A second service instance may receive the same successful
+            # PayPal capture after the first instance has committed it.
+            # Accept only the exact same PayPal capture ID.
+          if PaymentStatus(row["status"]) is PaymentStatus.CAPTURED:
+            self._require_channel(
+                row,
+                PaymentChannel.PAYPAL,
+                "confirm capture for",
             )
+            if row["paypal_capture_id"] == capture_id:
+                    return _to_record(row)
 
-            self._log(
+          self._require_status(
+            row,
+            {PaymentStatus.RESERVED},
+            "capture",
+          )
 
-                conn, "payment.captured", "system", payment_id, {"capture_id": capture_id}, now
+          updated = self._update(
+                conn,
+                payment_id,
+                now,
+                status=PaymentStatus.CAPTURED,
+                paypal_capture_id=capture_id,
+           )
 
-            )
+          self._log(
+                conn,
+                "payment.captured",
+                "system",
+                payment_id,
+                {"capture_id": capture_id},
+                now,
+        )
 
-            return _to_record(updated)
+      return _to_record(updated)
 
     def mark_failed(
 

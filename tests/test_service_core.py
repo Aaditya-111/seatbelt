@@ -1,6 +1,7 @@
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import threading
 
 import pytest
 from pydantic import ValidationError
@@ -435,6 +436,77 @@ def test_concurrent_paypal_returns_capture_only_once(tmp_path):
     assert all(r.payment_id == payment.payment_id for r in results)
     assert all(r.status is PaymentStatus.CAPTURED for r in results)
     assert len(paypal.captured) == 1
+
+def test_separate_services_concurrently_capture_with_same_idempotency_key(
+    tmp_path,
+):
+    class IdempotentConcurrentPayPal(FakePayPal):
+        def __init__(self):
+            super().__init__()
+            self.capture_barrier = threading.Barrier(2)
+            self.capture_lock = threading.Lock()
+            self.capture_results = {}
+            self.capture_requests = []
+
+        def capture_order(self, order_id, *, request_id=None):
+            # Force both independent services to reach the provider together.
+            self.capture_barrier.wait(timeout=10)
+
+            with self.capture_lock:
+                self.capture_requests.append(request_id)
+
+                # Simulate PayPal deduplicating the same request ID.
+                if request_id not in self.capture_results:
+                    result = super().capture_order(
+                        order_id,
+                        request_id=request_id,
+                    )
+                    self.capture_results[request_id] = result
+
+                return self.capture_results[request_id]
+
+    paypal = IdempotentConcurrentPayPal()
+    svc1, paypal, clock = build_paypal(tmp_path, paypal)
+
+    _, token = issue(svc1)
+    payment = submit_paypal(svc1, token)
+
+    # Put the payment in RESERVED, as it would be after verified approval.
+    svc1._store.mark_payer_approved(
+        payment.payment_id,
+        now=svc1._clock(),
+    )
+
+    # A second, independent service instance shares only the database
+    # and PayPal provider—not the first instance's in-process locks.
+    db2 = Database(tmp_path / "paypal.db")
+    db2.initialize()
+
+    svc2 = GuardService(
+        GuardStore(db2, KEY),
+        FakeExecutor(),
+        KEY,
+        max_mandate_ttl=timedelta(hours=24),
+        clock=clock,
+        paypal_client=paypal,
+        paypal_expected_merchant_id="MERCHANT-1",
+    )
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [
+            pool.submit(svc1.process_paypal_return, paypal.order_id),
+            pool.submit(svc2.process_paypal_return, paypal.order_id),
+        ]
+        results = [future.result(timeout=20) for future in futures]
+
+    assert all(r.status is PaymentStatus.CAPTURED for r in results)
+    assert len(paypal.capture_requests) == 2
+    assert len(set(paypal.capture_requests)) == 1
+    assert len(paypal.captured) == 1
+
+    final = svc1.get_payment(payment.payment_id)
+    assert final.status is PaymentStatus.CAPTURED
+    assert final.paypal_capture_id == paypal.capture_id
 
 
 def test_paypal_capture_timeout_is_reconciled_without_second_capture(tmp_path):
