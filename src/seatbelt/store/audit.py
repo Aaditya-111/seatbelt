@@ -75,6 +75,7 @@ def append(
 def verify(conn: sqlite3.Connection, key: bytes) -> ChainStatus:
     expected_seq = 1
     prev = GENESIS_HASH
+
     for row in conn.execute("SELECT * FROM audit_log ORDER BY seq ASC"):
         if row["seq"] != expected_seq:
             return ChainStatus(
@@ -83,6 +84,24 @@ def verify(conn: sqlite3.Connection, key: bytes) -> ChainStatus:
                 first_bad_seq=expected_seq,
                 reason=f"entry {expected_seq} is missing (found {row['seq']})",
             )
+
+        text_fields = (
+            "ts",
+            "event",
+            "actor",
+            "subject_id",
+            "data",
+            "prev_hash",
+            "hash",
+        )
+        if any(not isinstance(row[field], str) for field in text_fields):
+            return ChainStatus(
+                ok=False,
+                entries=expected_seq - 1,
+                first_bad_seq=row["seq"],
+                reason="entry contains a non-text field",
+            )
+
         if row["prev_hash"] != prev:
             return ChainStatus(
                 ok=False,
@@ -90,6 +109,7 @@ def verify(conn: sqlite3.Connection, key: bytes) -> ChainStatus:
                 first_bad_seq=row["seq"],
                 reason="link to the previous entry is broken",
             )
+
         recomputed = _entry_hash(
             key,
             row["seq"],
@@ -100,6 +120,7 @@ def verify(conn: sqlite3.Connection, key: bytes) -> ChainStatus:
             row["data"],
             row["prev_hash"],
         )
+
         if not hmac.compare_digest(recomputed, row["hash"]):
             return ChainStatus(
                 ok=False,
@@ -107,8 +128,10 @@ def verify(conn: sqlite3.Connection, key: bytes) -> ChainStatus:
                 first_bad_seq=row["seq"],
                 reason="entry contents do not match their signature",
             )
+
         prev = row["hash"]
         expected_seq += 1
+
     return ChainStatus(
         ok=True,
         entries=expected_seq - 1,

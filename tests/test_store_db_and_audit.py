@@ -121,6 +121,88 @@ def test_forged_history_without_the_key_is_detected(db):
         status = audit.verify(c, KEY)  # ...but not with the real key
     assert not status.ok and status.first_bad_seq == 1
 
+def test_forged_appended_entry_is_detected(db):
+    add(db, 3)
+
+    conn = raw(db)
+    last = conn.execute(
+        "SELECT hash FROM audit_log ORDER BY seq DESC LIMIT 1"
+    ).fetchone()
+
+    conn.execute(
+        """
+        INSERT INTO audit_log
+            (seq, ts, event, actor, subject_id, data, prev_hash, hash)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            4,
+            T.isoformat(),
+            "payment.captured",
+            "attacker",
+            "forged-payment",
+            '{"amount":"999999.00"}',
+            last["hash"],
+            "0" * 64,
+        ),
+    )
+    conn.close()
+
+    with db.transaction(write=False) as conn:
+        status = audit.verify(conn, KEY)
+
+    assert not status.ok
+    assert status.first_bad_seq == 4
+
+
+def test_editing_the_final_entry_is_detected(db):
+    add(db, 3)
+
+    conn = raw(db)
+    conn.execute(
+        "UPDATE audit_log SET event = 'payment.forged' WHERE seq = 3"
+    )
+    conn.close()
+
+    with db.transaction(write=False) as conn:
+        status = audit.verify(conn, KEY)
+
+    assert not status.ok
+    assert status.first_bad_seq == 3
+
+
+def test_malformed_hash_storage_returns_invalid_chain(db):
+    add(db, 2)
+
+    conn = raw(db)
+    conn.execute(
+        "UPDATE audit_log SET hash = ? WHERE seq = 2",
+        (sqlite3.Binary(b"malformed-hash"),),
+    )
+    conn.close()
+
+    with db.transaction(write=False) as conn:
+        status = audit.verify(conn, KEY)
+
+    assert not status.ok
+    assert status.first_bad_seq == 2
+
+def test_malformed_entry_data_returns_invalid_chain(db):
+    add(db, 2)
+
+    conn = raw(db)
+    conn.execute(
+        "UPDATE audit_log SET data = ? WHERE seq = 2",
+        (sqlite3.Binary(b"\xff\xfe"),),
+    )
+    conn.close()
+
+    with db.transaction(write=False) as conn:
+        status = audit.verify(conn, KEY)
+
+    assert not status.ok
+    assert status.first_bad_seq == 2
+
 
 def test_truncating_the_tail_is_only_detectable_against_a_remembered_head(db):
     add(db, 5)
