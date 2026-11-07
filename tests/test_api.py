@@ -581,6 +581,7 @@ class APIFakePayPal:
         self.captured = []
         self.completed = False
         self.order_status = "APPROVED"
+        self.lose_capture_response = False
 
     def create_order(self, money, *, description, reference_id, request_id=None):
         self.reference_id = reference_id
@@ -628,6 +629,10 @@ class APIFakePayPal:
         assert order_id == self.order_id
         self.captured.append(request_id)
         self.completed = True
+
+        if self.lose_capture_response:
+            self.lose_capture_response = False
+            raise RuntimeError("simulated lost PayPal capture response")
 
         return CaptureResult(
             order_id=self.order_id,
@@ -715,6 +720,32 @@ def test_duplicate_paypal_api_returns_do_not_capture_twice(tmp_path):
     assert second.status_code == 200, second.text
     assert first.json()["status"] == "captured"
     assert second.json()["status"] == "captured"
+    assert len(paypal.captured) == 1
+
+
+def test_paypal_api_recovers_lost_capture_response_without_recapturing(tmp_path):
+    paypal = APIFakePayPal()
+    paypal.lose_capture_response = True
+    client = make_client(tmp_path, paypal=paypal, raise_exceptions=False)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    first = client.get(
+        "/v1/paypal/return",
+        params={"token": paypal.order_id},
+    )
+    assert first.status_code == 500, first.text
+    assert len(paypal.captured) == 1
+
+    retry = client.get(
+        "/v1/paypal/return",
+        params={"token": paypal.order_id},
+    )
+    assert retry.status_code == 200, retry.text
+    assert retry.json()["status"] == "captured"
+    assert retry.json()["paypal_capture_id"] == paypal.capture_id
     assert len(paypal.captured) == 1
 
 
