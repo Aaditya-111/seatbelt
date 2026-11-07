@@ -528,6 +528,49 @@ def test_paypal_capture_timeout_is_reconciled_without_second_capture(tmp_path):
     assert len(paypal.captured) == 1
 
 
+
+def test_paypal_capture_recovers_after_service_restart(tmp_path):
+    paypal = FakePayPal(lose_capture_response=True)
+    svc1, paypal, clock = build_paypal(tmp_path, paypal)
+
+    _, token = issue(svc1)
+    payment = submit_paypal(svc1, token)
+
+    # PayPal completes the capture, but Seatbelt loses the response.
+    with pytest.raises(RuntimeError, match="lost capture response"):
+        svc1.process_paypal_return(paypal.order_id)
+
+    stuck = svc1.get_payment(payment.payment_id)
+    assert stuck.status is PaymentStatus.RESERVED
+    assert len(paypal.captured) == 1
+
+    # Simulate an application restart: new database and service objects,
+    # reopening the same persistent database file.
+    db2 = Database(tmp_path / "paypal.db")
+    db2.initialize()
+
+    svc2 = GuardService(
+        GuardStore(db2, KEY),
+        FakeExecutor(),
+        KEY,
+        max_mandate_ttl=timedelta(hours=24),
+        clock=clock,
+        paypal_client=paypal,
+        paypal_expected_merchant_id="MERCHANT-1",
+    )
+
+    recovered = svc2.retry_payment(payment.payment_id)
+
+    assert recovered.status is PaymentStatus.CAPTURED
+    assert recovered.paypal_capture_id == paypal.capture_id
+
+    # The restarted service reconciled PayPal's completed order.
+    # It did not issue another capture.
+    assert len(paypal.captured) == 1
+
+    # The original service sees the same persisted result.
+    assert svc1.get_payment(payment.payment_id).status is PaymentStatus.CAPTURED
+    assert svc2.verify_audit().ok
 @pytest.mark.parametrize(
     "overrides",
     [
