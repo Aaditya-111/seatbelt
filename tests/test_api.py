@@ -45,6 +45,7 @@ def make_client(tmp_path, executor=None, raise_exceptions=True, paypal=None):
     client.clock = clock
     client.executor = service._executor
     client.paypal = paypal
+    client.store = service._store
     return client
 
 
@@ -81,6 +82,17 @@ def pay(client, token, **overrides):
     body = dict(request_id="r1", payee="shop-a", amount="20.00", currency="USD")
     body.update(overrides)
     return client.post("/v1/payments", headers=bearer(token), json=body)
+
+def corrupt_latest_audit_hash(client):
+    with client.store._db.transaction(write=True) as conn:
+        conn.execute(
+            """
+            UPDATE audit_log
+            SET hash = ?
+            WHERE seq = (SELECT MAX(seq) FROM audit_log)
+            """,
+            ("0" * 64,),
+        )
 
 
 # ---------------- basics ----------------
@@ -184,6 +196,27 @@ def test_small_payment_is_allowed_and_executed(client):
     assert body["status"] == "captured" and body["verdict"] == "allow"
     assert body["amount"] == "20.00"  # a string, never a float
     assert len(client.executor.executed) == 1
+
+def test_corrupted_audit_blocks_payment_api(tmp_path):
+    client = make_client(tmp_path, raise_exceptions=False)
+    _, token = issue(client)
+
+    corrupt_latest_audit_hash(client)
+
+    response = pay(
+        client,
+        token,
+        request_id="audit-corruption-api-test",
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+    "detail": "Payment operations are temporarily disabled due to an integrity check failure."
+    }
+    assert client.executor.executed == []
+
+    audit = client.store.verify_audit()
+    assert audit.ok is False
 
 
 def test_large_payment_waits_then_admin_approval_executes_it(client):

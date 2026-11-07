@@ -43,6 +43,7 @@ from pathlib import Path
 from seatbelt.store import audit_checkpoint
 
 from seatbelt.errors import (
+    AuditIntegrityError,
 
     IdempotencyConflictError,
 
@@ -213,7 +214,7 @@ class GuardStore:
         status = audit.verify(conn, self._audit_key)
 
         if not status.ok:
-            raise RuntimeError(
+            raise AuditIntegrityError(
                 "audit integrity verification failed; mutations are disabled"
             )
 
@@ -228,7 +229,7 @@ class GuardStore:
                 )
             )
         except audit_checkpoint.CheckpointError as exc:
-            raise RuntimeError(
+            raise AuditIntegrityError(
                 f"audit checkpoint verification failed: {exc}"
             ) from exc
 
@@ -242,7 +243,7 @@ class GuardStore:
             actual_hash = None if row is None else row["hash"]
 
         if actual_hash != checkpoint_hash:
-            raise RuntimeError(
+            raise AuditIntegrityError(
                 "audit checkpoint does not match database history; "
                 "mutations are disabled"
             )
@@ -1288,7 +1289,7 @@ class GuardStore:
                 or "; ".join(status.reasons)
                 or "audit chain verification failed"
             )
-            raise RuntimeError(
+            raise AuditIntegrityError(
                 f"refusing payment because audit integrity check failed: {detail}"
             )
 
@@ -1296,7 +1297,7 @@ class GuardStore:
             self._audit_checkpoint_path
             and status.checkpoint_ok is not True
         ):
-            raise RuntimeError(
+            raise AuditIntegrityError(
                 "refusing payment because audit checkpoint is not verified"
             )
 

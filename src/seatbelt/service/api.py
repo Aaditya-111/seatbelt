@@ -22,6 +22,7 @@ from pydantic import SecretStr, ValidationError
 
 from seatbelt import __version__
 from seatbelt.errors import (
+    AuditIntegrityError,
     IdempotencyConflictError,
     InvalidTransitionError,
     MalformedMandateError,
@@ -104,6 +105,18 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
 
     for exc_type, status in _STATUS_BY_ERROR:
         _register(exc_type, status)
+
+    @app.exception_handler(AuditIntegrityError)
+    async def _audit_integrity_error(
+        _: Request, exc: AuditIntegrityError
+    ) -> JSONResponse:
+        log.error("payment operations blocked by audit integrity failure: %s", exc)
+        return JSONResponse(
+            status_code=503,
+            content={
+                "detail": "Payment operations are temporarily disabled due to an integrity check failure."
+            },
+        )
 
     @app.exception_handler(ValidationError)
     async def _validation(_: Request, exc: ValidationError) -> JSONResponse:

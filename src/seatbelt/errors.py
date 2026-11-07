@@ -63,6 +63,10 @@ class MandateNotYetValidError(MandateError):
 
 
 
+class AuditIntegrityError(RuntimeError):
+    """Audit history or its external checkpoint failed verification."""
+
+
 class StoreError(SeatbeltError):
     """Base class for storage-layer errors."""
 
