@@ -620,6 +620,60 @@ def test_duplicate_paypal_api_returns_do_not_capture_twice(tmp_path):
     assert len(paypal.captured) == 1
 
 
+def test_corrupted_audit_blocks_paypal_checkout_api(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(
+        tmp_path,
+        paypal=paypal,
+        raise_exceptions=False,
+    )
+    _, token = issue(client)
+
+    corrupt_latest_audit_hash(client)
+
+    response = submit_paypal_api(
+        client,
+        token,
+        request_id="corrupt-audit-checkout",
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Payment operations are temporarily disabled due to an integrity check failure."
+    }
+    assert paypal.created == []
+    assert paypal.captured == []
+    assert client.store.verify_audit().ok is False
+
+
+def test_corrupted_audit_blocks_paypal_capture_api(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(
+        tmp_path,
+        paypal=paypal,
+        raise_exceptions=False,
+    )
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+    assert len(paypal.created) == 1
+
+    corrupt_latest_audit_hash(client)
+
+    response = client.get(
+        "/v1/paypal/return",
+        params={"token": paypal.order_id},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "Payment operations are temporarily disabled due to an integrity check failure."
+    }
+    assert paypal.captured == []
+    assert client.store.verify_audit().ok is False
+
+
 def test_paypal_api_rejects_wrong_merchant_without_capture(tmp_path):
     paypal = APIFakePayPal(merchant_id="ATTACKER-MERCHANT")
     client = make_client(
