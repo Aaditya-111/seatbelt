@@ -127,6 +127,17 @@ def test_allowed_payment_is_executed_exactly_once_and_captured(env):
     assert p.paypal_order_id and p.paypal_capture_id
     assert executor.executed == [p.payment_id]
 
+def test_corrupted_audit_blocks_payment_execution(tmp_path):
+    svc, executor, _ = build(tmp_path)
+    _, token = issue(svc)
+
+    corrupt_latest_audit_hash(svc)
+
+    with pytest.raises(RuntimeError, match="audit"):
+        pay(svc, token, request_id="audit-corrupt-r1")
+
+    assert executor.executed == []
+
 
 def test_payment_needing_approval_does_not_execute_until_approved(env):
     svc, executor, _ = env
@@ -377,6 +388,19 @@ def submit_paypal(svc, token, request_id="paypal-r1", amount="20"):
         description="Test purchase",
     )
 
+def corrupt_latest_audit_hash(svc):
+    with svc._store._db.transaction(write=True) as conn:
+        row = conn.execute(
+            "SELECT MAX(seq) AS seq FROM audit_log"
+        ).fetchone()
+
+        assert row is not None and row["seq"] is not None
+
+        conn.execute(
+            "UPDATE audit_log SET hash = ? WHERE seq = ?",
+            ("0" * 64, row["seq"]),
+        )
+
 
 def test_paypal_payment_creates_checkout_and_persists_order(tmp_path):
     svc, paypal, _ = build_paypal(tmp_path)
@@ -393,6 +417,20 @@ def test_paypal_payment_creates_checkout_and_persists_order(tmp_path):
     assert len(paypal.created) == 1
     assert paypal.created[0]
 
+def test_corrupted_audit_blocks_paypal_checkout_creation(tmp_path):
+    svc, paypal, _ = build_paypal(tmp_path)
+    _, token = issue(svc)
+
+    payment = submit_paypal(svc, token)
+    initial_created = len(paypal.created)
+
+    corrupt_latest_audit_hash(svc)
+
+    with pytest.raises(RuntimeError, match="audit"):
+        svc._create_paypal_checkout(payment)
+
+    assert len(paypal.created) == initial_created
+
 
 def test_paypal_return_verifies_order_and_captures_once(tmp_path):
     svc, paypal, _ = build_paypal(tmp_path)
@@ -405,6 +443,25 @@ def test_paypal_return_verifies_order_and_captures_once(tmp_path):
     assert completed.paypal_capture_id == paypal.capture_id
     assert len(paypal.captured) == 1
     assert paypal.captured[0]
+
+def test_corrupted_audit_blocks_paypal_capture(tmp_path):
+    svc, paypal, _ = build_paypal(tmp_path)
+    _, token = issue(svc)
+
+    payment = submit_paypal(svc, token)
+
+    # Simulate PayPal approval before the audit history is corrupted.
+    svc._store.mark_payer_approved(
+        payment.payment_id,
+        now=svc._clock(),
+    )
+
+    corrupt_latest_audit_hash(svc)
+
+    with pytest.raises(RuntimeError, match="audit"):
+        svc.process_paypal_return(paypal.order_id)
+
+    assert paypal.captured == []
 
 
 def test_duplicate_paypal_return_does_not_capture_twice(tmp_path):
