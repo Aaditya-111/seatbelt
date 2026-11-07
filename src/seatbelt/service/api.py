@@ -264,4 +264,18 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
     def verify_audit() -> ChainStatus:
         return service.verify_audit()
 
+    @app.post(
+        "/v1/audit/checkpoint",
+        response_model=ChainStatus,
+        tags=["admin"],
+        dependencies=[Admin],
+    )
+    def create_audit_checkpoint() -> ChainStatus:
+        try:
+            return service.create_audit_checkpoint()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ValueError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+
     return app

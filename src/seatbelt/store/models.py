@@ -24,6 +24,9 @@ class ChainStatus(BaseModel):
     reasons: tuple[Reason, ...] = Field(default_factory=tuple)
     head_seq: int | None = None
     head_hash: str | None = None
+    checkpoint_ok: bool | None = None
+    checkpoint_seq: int | None = None
+    checkpoint_error: str | None = None
 
 
 class PaymentStatus(str, Enum):

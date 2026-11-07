@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     server_port: int = Field(default=8000, ge=1, le=65535)
 
     database_path: str = Field(default="seatbelt.db", min_length=1)
+    audit_checkpoint_path: str | None = None
     policy_budget_alert_ratio: Decimal = Field(default=Decimal("0.8"), gt=0, le=1)
 
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"

@@ -288,6 +288,9 @@ class GuardService:
     def verify_audit(self) -> ChainStatus:
         return self._store.verify_audit()
 
+    def create_audit_checkpoint(self):
+        return self._store.create_audit_checkpoint()
+
     # ------------------------------------------------------------------ internals
     @staticmethod
     def _paypal_request_id(operation: str, payment_id: str) -> str:

@@ -38,6 +38,10 @@ from typing import Any
 
 from pydantic import SecretStr
 
+from pathlib import Path
+
+from seatbelt.store import audit_checkpoint
+
 from seatbelt.errors import (
 
     IdempotencyConflictError,
@@ -167,6 +171,8 @@ class GuardStore:
 
         policy_config: PolicyConfig | None = None,
 
+        audit_checkpoint_path: str | None = None,
+
     ) -> None:
 
         self._db = db
@@ -174,6 +180,8 @@ class GuardStore:
         self._audit_key = audit.derive_audit_key(signing_key)
 
         self._policy_config = policy_config or PolicyConfig()
+
+        self._audit_checkpoint_path = audit_checkpoint_path
 
     # ------------------------------------------------------------------ helpers
 
@@ -1248,3 +1256,92 @@ class GuardStore:
         with self._db.transaction(write=False) as conn:
 
             return audit.verify(conn, self._audit_key)
+
+    def create_audit_checkpoint(self) -> ChainStatus:
+        """Create or advance a checkpoint only from a trusted chain state."""
+        if not self._audit_checkpoint_path:
+            raise RuntimeError("AUDIT_CHECKPOINT_PATH is not configured")
+
+        checkpoint_exists = Path(self._audit_checkpoint_path).expanduser().exists()
+
+        if checkpoint_exists:
+            # Never overwrite an existing checkpoint if it detects tampering.
+            status = self.verify_audit()
+        else:
+            # First checkpoint: verify the chain itself.
+            with self._db.transaction(write=False) as conn:
+                status = audit.verify(conn, self._audit_key)
+
+        if not status.ok:
+            raise ValueError("cannot checkpoint an invalid audit chain")
+
+        seq = status.head_seq or 0
+        head_hash = status.head_hash or audit.GENESIS_HASH
+
+        audit_checkpoint.write_checkpoint(
+            self._audit_checkpoint_path,
+            self._audit_key,
+            seq,
+            head_hash,
+        )
+        return self.verify_audit()
+
+    def verify_audit(self) -> ChainStatus:
+        """Verify the audit chain and, when configured, its external checkpoint."""
+        with self._db.transaction(write=False) as conn:
+            status = audit.verify(conn, self._audit_key)
+
+            if not self._audit_checkpoint_path:
+                return status
+
+            if not status.ok:
+                return status.model_copy(
+                    update={
+                        "checkpoint_ok": False,
+                        "checkpoint_error": "audit chain is invalid",
+                    }
+                )
+
+            try:
+                checkpoint_seq, checkpoint_hash = audit_checkpoint.read_checkpoint(
+                    self._audit_checkpoint_path,
+                    self._audit_key,
+                )
+
+                if checkpoint_seq == 0:
+                    actual_hash = audit.GENESIS_HASH
+                else:
+                    row = conn.execute(
+                        "SELECT hash FROM audit_log WHERE seq = ?",
+                        (checkpoint_seq,),
+                    ).fetchone()
+                    actual_hash = None if row is None else row["hash"]
+
+                if actual_hash != checkpoint_hash:
+                    return status.model_copy(
+                        update={
+                            "ok": False,
+                            "checkpoint_ok": False,
+                            "checkpoint_seq": checkpoint_seq,
+                            "checkpoint_error": (
+                                "database audit history does not match checkpoint"
+                            ),
+                        }
+                    )
+
+                return status.model_copy(
+                    update={
+                        "checkpoint_ok": True,
+                        "checkpoint_seq": checkpoint_seq,
+                        "checkpoint_error": None,
+                    }
+                )
+
+            except audit_checkpoint.CheckpointError as exc:
+                return status.model_copy(
+                    update={
+                        "ok": False,
+                        "checkpoint_ok": False,
+                        "checkpoint_error": str(exc),
+                    }
+                )

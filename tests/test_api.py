@@ -108,6 +108,7 @@ def test_openapi_document_lists_the_endpoints(client):
         ("post", "/v1/payments/x/retry"),
         ("get", "/v1/audit"),
         ("get", "/v1/audit/verify"),
+        ("post", "/v1/audit/checkpoint"),
     ],
 )
 def test_admin_endpoints_reject_missing_wrong_and_agent_credentials(client, method, path):
@@ -377,7 +378,18 @@ def test_audit_log_lists_events_and_verifies(client):
     assert "payment.captured" in events and "mandate.registered" in events
     status = client.get("/v1/audit/verify", headers=ADMIN).json()
     assert status["ok"] is True and status["head_hash"] and status["entries"] >= 4
+
+def test_checkpoint_endpoint_requires_configured_path(client):
+    response = client.post("/v1/audit/checkpoint", headers=ADMIN)
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "AUDIT_CHECKPOINT_PATH is not configured"
+    }
 # ---------------- PayPal API security boundaries ----------------
+
+
+# ---------------- audit ----------------
 
 def test_paypal_checkout_requires_agent_authentication(client):
     r = client.post(

@@ -35,8 +35,8 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     store = GuardStore(
         database,
         config.mandate_signing_key,
+        audit_checkpoint_path=config.audit_checkpoint_path,
     )
-
     service = GuardService(
         store,
         DisabledExecutor(),
