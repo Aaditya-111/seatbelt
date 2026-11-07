@@ -186,45 +186,71 @@ class GuardStore:
     # ------------------------------------------------------------------ helpers
 
     def _log(
-
-        self,
-
-        conn: sqlite3.Connection,
-
-        event: str,
-
-        actor: str,
-
-        subject_id: str,
-
-        data: dict[str, Any],
-
-        now: datetime,
-
+            self,
+            conn: sqlite3.Connection,
+            event: str,
+            actor: str,
+            subject_id: str,
+            data: dict[str, Any],
+            now: datetime,
     ) -> None:
+           self._assert_audit_write_allowed(conn)
 
-        audit.append(
+           audit.append(
+              conn,
+              self._audit_key,
+              event=event,
+              actor=actor,
+              subject_id=subject_id,
+              data=data,
+              now=now,
+           )
 
-            conn,
+    def _assert_audit_write_allowed(
+        self, conn: sqlite3.Connection
+    ) -> None:
+        """Fail closed when the audit chain or configured checkpoint is invalid."""
+        status = audit.verify(conn, self._audit_key)
 
-            self._audit_key,
+        if not status.ok:
+            raise RuntimeError(
+                "audit integrity verification failed; mutations are disabled"
+            )
 
-            event=event,
+        if not self._audit_checkpoint_path:
+            return
 
-            actor=actor,
+        try:
+            checkpoint_seq, checkpoint_hash = (
+                audit_checkpoint.read_checkpoint(
+                    self._audit_checkpoint_path,
+                    self._audit_key,
+                )
+            )
+        except audit_checkpoint.CheckpointError as exc:
+            raise RuntimeError(
+                f"audit checkpoint verification failed: {exc}"
+            ) from exc
 
-            subject_id=subject_id,
+        if checkpoint_seq == 0:
+            actual_hash = audit.GENESIS_HASH
+        else:
+            row = conn.execute(
+                "SELECT hash FROM audit_log WHERE seq = ?",
+                (checkpoint_seq,),
+            ).fetchone()
+            actual_hash = None if row is None else row["hash"]
 
-            data=data,
+        if actual_hash != checkpoint_hash:
+            raise RuntimeError(
+                "audit checkpoint does not match database history; "
+                "mutations are disabled"
+            )
 
-            now=now,
 
-        )
-
-    @staticmethod
-
-    def _committed(conn: sqlite3.Connection, mandate_id: str) -> Decimal:
-
+    def _committed(
+        self, conn: sqlite3.Connection, mandate_id: str
+    ) -> Decimal:
         marks = ",".join("?" * len(HOLDING_STATUSES))
 
         rows = conn.execute(
@@ -264,7 +290,7 @@ class GuardStore:
                 f"(allowed from: {', '.join(sorted(s.value for s in allowed))})"
 
             )
-    
+
     @staticmethod
 
     def _require_channel(
@@ -566,7 +592,7 @@ class GuardStore:
                     and existing["currency"] == request.money.currency
 
                     and PaymentChannel(existing["payment_channel"])
-                     
+
                     is payment_channel
 
                 )
@@ -1251,11 +1277,28 @@ class GuardStore:
 
         ]
 
-    def verify_audit(self) -> ChainStatus:
 
-        with self._db.transaction(write=False) as conn:
+    def assert_audit_healthy(self) -> None:
+        """Refuse financial execution when audit integrity cannot be verified."""
+        status = self.verify_audit()
 
-            return audit.verify(conn, self._audit_key)
+        if not status.ok:
+            detail = (
+                status.checkpoint_error
+                or "; ".join(status.reasons)
+                or "audit chain verification failed"
+            )
+            raise RuntimeError(
+                f"refusing payment because audit integrity check failed: {detail}"
+            )
+
+        if (
+            self._audit_checkpoint_path
+            and status.checkpoint_ok is not True
+        ):
+            raise RuntimeError(
+                "refusing payment because audit checkpoint is not verified"
+            )
 
     def create_audit_checkpoint(self) -> ChainStatus:
         """Create or advance a checkpoint only from a trusted chain state."""

@@ -299,8 +299,10 @@ class GuardService:
         return hashlib.sha256(raw).hexdigest()[:32]
 
     def _create_paypal_checkout(self, payment: PaymentRecord) -> PaymentRecord:
+        self._store.assert_audit_healthy()
         if self._paypal is None or not self._paypal_merchant_id:
             raise RuntimeError("PayPal checkout is not fully configured")
+
 
         order = self._paypal.create_order(
             Money(amount=payment.amount, currency=payment.currency),
@@ -383,7 +385,7 @@ class GuardService:
                     unit.capture_id,
                     now=self._clock(),
                 )
-
+            self._store.assert_audit_healthy()
             result = self._paypal.capture_order(
                 order_id,
                 request_id=self._paypal_request_id("capture", payment_id),
@@ -407,8 +409,10 @@ class GuardService:
             )
 
     def _execute_if_reserved(self, record: PaymentRecord) -> PaymentRecord:
+
         if record.status is not PaymentStatus.RESERVED:
             return record
+        self._store.assert_audit_healthy()
 
         if record.payment_channel is PaymentChannel.PAYPAL:
             if record.paypal_order_id:
