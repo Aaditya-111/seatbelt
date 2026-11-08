@@ -553,3 +553,84 @@ def test_paypal_cancellation_marks_payment_cancelled(db):
     assert store.get_payment_by_order_id(
         "ORDER-CANCEL-STORE-1"
     ).status.value == "cancelled"
+
+def test_paypal_webhook_cannot_resurrect_cancelled_payment(db):
+    store, payment = make_paypal_store_payment(db)
+
+    store.attach_checkout(
+        payment.payment_id,
+        "ORDER-CANCELLED-WEBHOOK",
+        "https://www.sandbox.paypal.com/checkoutnow?token=ORDER-CANCELLED-WEBHOOK",
+        now=T,
+    )
+    cancelled = store.mark_paypal_cancelled(payment.payment_id, now=T)
+    assert cancelled.status.value == "cancelled"
+
+    with db.transaction(write=False) as conn:
+        audit_before = conn.execute(
+            "SELECT COUNT(*) FROM audit_log"
+        ).fetchone()[0]
+
+    with pytest.raises(InvalidTransitionError):
+        store.reconcile_paypal_webhook(
+            event_id="WH-CANCELLED-REPLAY",
+            event_type="PAYMENT.CAPTURE.COMPLETED",
+            payment_id=payment.payment_id,
+            capture_id="CAPTURE-CANCELLED-REPLAY",
+            now=T,
+        )
+
+    current = store.get_payment(payment.payment_id)
+    assert current.status.value == "cancelled"
+    assert current.paypal_capture_id is None
+
+    with db.transaction(write=False) as conn:
+        webhook_count = conn.execute(
+            "SELECT COUNT(*) FROM paypal_webhook_events"
+        ).fetchone()[0]
+        audit_after = conn.execute(
+            "SELECT COUNT(*) FROM audit_log"
+        ).fetchone()[0]
+
+    assert webhook_count == 0
+    assert audit_after == audit_before
+
+
+def test_paypal_webhook_cannot_resurrect_failed_payment(db):
+    store, payment = make_paypal_store_payment(db)
+
+    failed = store.mark_failed(
+        payment.payment_id,
+        "simulated provider failure",
+        now=T,
+    )
+    assert failed.status.value == "failed"
+
+    with db.transaction(write=False) as conn:
+        audit_before = conn.execute(
+            "SELECT COUNT(*) FROM audit_log"
+        ).fetchone()[0]
+
+    with pytest.raises(InvalidTransitionError):
+        store.reconcile_paypal_webhook(
+            event_id="WH-FAILED-REPLAY",
+            event_type="PAYMENT.CAPTURE.COMPLETED",
+            payment_id=payment.payment_id,
+            capture_id="CAPTURE-FAILED-REPLAY",
+            now=T,
+        )
+
+    current = store.get_payment(payment.payment_id)
+    assert current.status.value == "failed"
+    assert current.paypal_capture_id is None
+
+    with db.transaction(write=False) as conn:
+        webhook_count = conn.execute(
+            "SELECT COUNT(*) FROM paypal_webhook_events"
+        ).fetchone()[0]
+        audit_after = conn.execute(
+            "SELECT COUNT(*) FROM audit_log"
+        ).fetchone()[0]
+
+    assert webhook_count == 0
+    assert audit_after == audit_before
