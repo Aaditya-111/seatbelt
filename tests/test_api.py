@@ -1323,3 +1323,207 @@ def test_paypal_api_does_not_cancel_approved_order(tmp_path):
     assert response.status_code == 409
     assert response.json()["detail"] == "PayPal order is not in a cancellable state"
     assert paypal.captured == []
+
+def test_paypal_webhook_rejects_malformed_json_without_mutation(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers={
+            **_paypal_webhook_headers(),
+            "content-type": "application/json",
+        },
+        content=b'{"id":',
+    )
+
+    assert response.status_code == 400
+    assert paypal.webhook_verifications == []
+
+
+def test_paypal_webhook_rejects_oversized_body(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers={
+            **_paypal_webhook_headers(),
+            "content-type": "application/json",
+        },
+        content=b"x" * (256 * 1024 + 1),
+    )
+
+    assert response.status_code == 413
+    assert paypal.webhook_verifications == []
+
+
+def test_paypal_webhook_rejects_wrong_content_type(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers={
+            **_paypal_webhook_headers(),
+            "content-type": "text/plain",
+        },
+        content=b'{"id":"WH-INVALID"}',
+    )
+
+    assert response.status_code == 415
+    assert paypal.webhook_verifications == []
+
+
+def test_paypal_webhook_maps_missing_signature_header_to_400(
+    tmp_path, monkeypatch
+):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+
+    def reject_missing_header(headers, event, raw_event_body):
+        assert not headers.get("PAYPAL-TRANSMISSION-SIG")
+        raise ValueError("Missing or invalid PayPal header")
+
+    monkeypatch.setattr(
+        paypal, "verify_webhook_signature", reject_missing_header
+    )
+
+    headers = _paypal_webhook_headers()
+    headers.pop("PAYPAL-TRANSMISSION-SIG")
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=headers,
+        json={"id": "WH-MISSING-HEADER"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_paypal_webhook_maps_verification_outage_to_503(
+    tmp_path, monkeypatch
+):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+
+    def verification_unavailable(headers, event, raw_event_body):
+        raise RuntimeError("simulated PayPal verification outage")
+
+    monkeypatch.setattr(
+        paypal, "verify_webhook_signature", verification_unavailable
+    )
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json={"id": "WH-VERIFICATION-OUTAGE"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "PayPal webhook processing is temporarily unavailable"
+    }
+    assert "simulated PayPal" not in response.text
+
+def test_paypal_webhook_rejects_malformed_json_without_mutation(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers={
+            **_paypal_webhook_headers(),
+            "content-type": "application/json",
+        },
+        content=b'{"id":',
+    )
+
+    assert response.status_code == 400
+    assert paypal.webhook_verifications == []
+
+
+def test_paypal_webhook_rejects_oversized_body(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers={
+            **_paypal_webhook_headers(),
+            "content-type": "application/json",
+        },
+        content=b"x" * (256 * 1024 + 1),
+    )
+
+    assert response.status_code == 413
+    assert paypal.webhook_verifications == []
+
+
+def test_paypal_webhook_rejects_wrong_content_type(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers={
+            **_paypal_webhook_headers(),
+            "content-type": "text/plain",
+        },
+        content=b'{"id":"WH-INVALID"}',
+    )
+
+    assert response.status_code == 415
+    assert paypal.webhook_verifications == []
+
+
+def test_paypal_webhook_maps_missing_signature_header_to_400(
+    tmp_path, monkeypatch
+):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+
+    def reject_missing_header(headers, event, raw_event_body):
+        assert not headers.get("PAYPAL-TRANSMISSION-SIG")
+        raise ValueError("Missing or invalid PayPal header")
+
+    monkeypatch.setattr(
+        paypal, "verify_webhook_signature", reject_missing_header
+    )
+
+    headers = _paypal_webhook_headers()
+    headers.pop("PAYPAL-TRANSMISSION-SIG")
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=headers,
+        json={"id": "WH-MISSING-HEADER"},
+    )
+
+    assert response.status_code == 400
+
+
+def test_paypal_webhook_maps_verification_outage_to_503(
+    tmp_path, monkeypatch
+):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+
+    def verification_unavailable(headers, event, raw_event_body):
+        raise RuntimeError("simulated PayPal verification outage")
+
+    monkeypatch.setattr(
+        paypal, "verify_webhook_signature", verification_unavailable
+    )
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json={"id": "WH-VERIFICATION-OUTAGE"},
+    )
+
+    assert response.status_code == 503
+    assert response.json() == {
+        "detail": "PayPal webhook processing is temporarily unavailable"
+    }
+    assert "simulated PayPal" not in response.text
