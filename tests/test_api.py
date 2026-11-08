@@ -1,5 +1,7 @@
 import json
 from datetime import datetime, timedelta, timezone
+from concurrent.futures import ThreadPoolExecutor
+
 from decimal import Decimal
 
 import pytest
@@ -877,6 +879,110 @@ def test_paypal_webhook_duplicate_delivery_is_idempotent(tmp_path):
 
     payment = client.store.get_payment_by_order_id(paypal.order_id)
     assert payment.paypal_capture_id == paypal.capture_id
+
+def test_paypal_webhook_concurrent_duplicate_delivery_is_idempotent(
+    tmp_path,
+):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(
+        client, token, request_id="concurrent-webhook-payment"
+    )
+    assert checkout.status_code == 200, checkout.text
+
+    paypal.completed = True
+    event = _completed_capture_event(
+        paypal, event_id="WH-CONCURRENT-DUPLICATE-1"
+    )
+
+    def deliver_webhook(_):
+        return client.post(
+            "/v1/paypal/webhook",
+            headers=_paypal_webhook_headers(),
+            json=event,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        responses = list(executor.map(deliver_webhook, range(8)))
+
+    assert all(
+        response.status_code == 200 for response in responses
+    ), [response.text for response in responses]
+
+    results = [response.json() for response in responses]
+
+    assert sum(r["duplicate"] is False for r in results) == 1
+    assert sum(r["duplicate"] is True for r in results) == 7
+    assert all(r["status"] == "captured" for r in results)
+
+    payment = client.store.get_payment_by_order_id(paypal.order_id)
+    assert payment.status.value == "captured"
+    assert payment.paypal_capture_id == paypal.capture_id
+    assert paypal.captured == []
+
+def test_paypal_webhook_rejects_event_id_reused_for_different_capture(
+    tmp_path,
+):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    # First legitimate payment and webhook.
+    first_checkout = submit_paypal_api(
+        client, token, request_id="event-id-first-payment"
+    )
+    assert first_checkout.status_code == 200, first_checkout.text
+
+    paypal.completed = True
+    first_event = _completed_capture_event(
+        paypal, event_id="WH-REUSED-EVENT-ID"
+    )
+    first_response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json=first_event,
+    )
+
+    assert first_response.status_code == 200, first_response.text
+    assert first_response.json()["duplicate"] is False
+
+    # A different order and capture, but the same webhook event ID.
+    paypal.order_id = "ORDER-API-SECOND"
+    paypal.capture_id = "CAPTURE-API-SECOND"
+
+    second_checkout = submit_paypal_api(
+        client, token, request_id="event-id-second-payment"
+    )
+    assert second_checkout.status_code == 200, second_checkout.text
+
+    second_payment_id = second_checkout.json()["payment_id"]
+
+    second_event = _completed_capture_event(
+        paypal, event_id="WH-REUSED-EVENT-ID"
+    )
+    second_response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json=second_event,
+    )
+
+    assert second_response.status_code == 409, second_response.text
+
+    second_payment = client.store.get_payment_by_order_id(
+        paypal.order_id
+    )
+    assert second_payment.payment_id == second_payment_id
+    assert second_payment.status.value == "awaiting_payer"
+    assert second_payment.paypal_capture_id is None
+
+    first_payment = client.store.get_payment_by_order_id("ORDER-API-1")
+    assert first_payment.status.value == "captured"
+    assert first_payment.paypal_capture_id == "CAPTURE-API-1"
+
+    # Webhook reconciliation never initiates a second capture.
+    assert paypal.captured == []
 
 
 def test_paypal_webhook_rejects_capture_owned_by_another_payment(tmp_path):
