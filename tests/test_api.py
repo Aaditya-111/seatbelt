@@ -922,6 +922,108 @@ def test_paypal_webhook_concurrent_duplicate_delivery_is_idempotent(
     assert payment.paypal_capture_id == paypal.capture_id
     assert paypal.captured == []
 
+def test_paypal_webhook_rejects_mismatched_capture_amount(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    paypal.completed = True
+    event = _completed_capture_event(paypal)
+    event["resource"]["amount"]["value"] = "19.99"
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json=event,
+    )
+
+    assert response.status_code == 400, response.text
+
+    payment = client.store.get_payment_by_order_id(paypal.order_id)
+    assert payment.status.value == "awaiting_payer"
+    assert payment.paypal_capture_id is None
+    assert paypal.captured == []
+
+def test_paypal_webhook_rejects_mismatched_capture_currency(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    paypal.completed = True
+    event = _completed_capture_event(paypal)
+    event["resource"]["amount"]["currency_code"] = "EUR"
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json=event,
+    )
+
+    assert response.status_code == 400, response.text
+
+    payment = client.store.get_payment_by_order_id(paypal.order_id)
+    assert payment.status.value == "awaiting_payer"
+    assert payment.paypal_capture_id is None
+    assert paypal.captured == []
+
+def test_paypal_webhook_rejects_mismatched_order_id(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    paypal.completed = True
+    event = _completed_capture_event(paypal)
+    event["resource"]["supplementary_data"]["related_ids"][
+        "order_id"
+    ] = "ORDER-ATTACKER-999"
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json=event,
+    )
+
+    assert response.status_code == 404, response.text
+
+    payment = client.store.get_payment_by_order_id(paypal.order_id)
+    assert payment.status.value == "awaiting_payer"
+    assert payment.paypal_capture_id is None
+    assert paypal.captured == []
+
+def test_paypal_webhook_rejects_provider_order_not_completed(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    # Event claims completion, but the provider still reports APPROVED.
+    paypal.completed = False
+    event = _completed_capture_event(paypal)
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json=event,
+    )
+
+    assert response.status_code == 400, response.text
+
+    payment = client.store.get_payment_by_order_id(paypal.order_id)
+    assert payment.status.value == "awaiting_payer"
+    assert payment.paypal_capture_id is None
+    assert paypal.captured == []
+
 def test_paypal_webhook_rejects_event_id_reused_for_different_capture(
     tmp_path,
 ):
