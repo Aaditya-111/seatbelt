@@ -634,3 +634,46 @@ def test_paypal_webhook_cannot_resurrect_failed_payment(db):
 
     assert webhook_count == 0
     assert audit_after == audit_before
+
+def test_paypal_webhook_deduplicates_same_capture_with_different_event_id(db):
+    store, payment = make_paypal_store_payment(db)
+
+    first, first_duplicate = store.reconcile_paypal_webhook(
+        event_id="WH-FIRST-DELIVERY",
+        event_type="PAYMENT.CAPTURE.COMPLETED",
+        payment_id=payment.payment_id,
+        capture_id="CAPTURE-SAME-PAYMENT",
+        now=T,
+    )
+
+    assert first.status.value == "captured"
+    assert first.paypal_capture_id == "CAPTURE-SAME-PAYMENT"
+    assert first_duplicate is False
+
+    with db.transaction(write=False) as conn:
+        audit_before = conn.execute(
+            "SELECT COUNT(*) FROM audit_log"
+        ).fetchone()[0]
+
+    second, second_duplicate = store.reconcile_paypal_webhook(
+        event_id="WH-SECOND-DELIVERY",
+        event_type="PAYMENT.CAPTURE.COMPLETED",
+        payment_id=payment.payment_id,
+        capture_id="CAPTURE-SAME-PAYMENT",
+        now=T,
+    )
+
+    assert second.status.value == "captured"
+    assert second.paypal_capture_id == "CAPTURE-SAME-PAYMENT"
+    assert second_duplicate is True
+
+    with db.transaction(write=False) as conn:
+        webhook_count = conn.execute(
+            "SELECT COUNT(*) FROM paypal_webhook_events"
+        ).fetchone()[0]
+        audit_after = conn.execute(
+            "SELECT COUNT(*) FROM audit_log"
+        ).fetchone()[0]
+
+    assert webhook_count == 1
+    assert audit_after == audit_before

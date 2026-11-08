@@ -1200,10 +1200,12 @@ class GuardStore:
                 (capture_id,),
             ).fetchone()
 
-            if capture_owner is not None and capture_owner["payment_id"] != payment_id:
-                raise InvalidTransitionError(
-                    "PayPal capture is already associated with another payment"
-                )
+            if capture_owner is not None:
+                if capture_owner["payment_id"] != payment_id:
+                    raise InvalidTransitionError(
+                        "PayPal capture is already associated with another payment"
+                    )
+                return _to_record(self._load_payment(conn, payment_id)), True
 
             payment_capture_owner = conn.execute(
                 "SELECT payment_id FROM payments "
