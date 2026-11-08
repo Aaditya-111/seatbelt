@@ -8,6 +8,9 @@
 
 from __future__ import annotations
 
+import json
+
+
 import logging
 import random
 import threading
@@ -106,6 +109,7 @@ class PayPalClient:
         path: str,
         *,
         json: dict[str, Any] | None = None,
+        content: bytes | None = None,
         request_id: str | None = None,
     ) -> dict[str, Any]:
         headers: dict[str, str] = {}
@@ -119,7 +123,7 @@ class PayPalClient:
         while True:
             headers["Authorization"] = f"Bearer {self._get_token()}"
             try:
-                resp = self._http.request(method, path, json=json, headers=headers)
+                resp = self._http.request(method, path, json=json, content=content, headers=headers)
             except httpx.TransportError as exc:
                 if attempt >= self._settings.paypal_max_retries:
                     raise PayPalError(f"Network error talking to PayPal: {exc}") from exc
@@ -170,6 +174,7 @@ class PayPalClient:
         self,
         headers: dict[str, str],
         event: dict[str, object],
+        raw_event_body: bytes,
     ) -> bool:
         """Verify a webhook using PayPal's official postback endpoint."""
         webhook_id = self._settings.paypal_webhook_id
@@ -197,16 +202,29 @@ class PayPalClient:
                 raise ValueError(f"Missing or invalid PayPal header: {header_name}")
             transmission[field] = value
 
-        payload = {
+        if not isinstance(raw_event_body, bytes) or not raw_event_body:
+            raise ValueError("Original PayPal webhook body is required")
+
+        # Keep the original event JSON bytes intact. PayPal's verification
+        # endpoint requires webhook_event to be sent without reformatting.
+        envelope = {
             **transmission,
             "webhook_id": webhook_id,
-            "webhook_event": event,
         }
+        prefix = json.dumps(
+            envelope, separators=(",", ":"), ensure_ascii=True
+        ).encode("utf-8")
+        payload = (
+            prefix[:-1]
+            + b',"webhook_event":'
+            + raw_event_body
+            + b"}"
+        )
 
         result = self._request(
             "POST",
             "/v1/notifications/verify-webhook-signature",
-            json=payload,
+            content=payload,
         )
         return result.get("verification_status") == "SUCCESS"
 

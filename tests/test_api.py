@@ -1,3 +1,4 @@
+import json
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -586,8 +587,8 @@ class APIFakePayPal:
         self.webhook_signature_valid = True
         self.webhook_verifications = []
 
-    def verify_webhook_signature(self, headers, event):
-        self.webhook_verifications.append((headers, event))
+    def verify_webhook_signature(self, headers, event, raw_event_body):
+        self.webhook_verifications.append((headers, event, raw_event_body))
         return self.webhook_signature_valid
 
     def create_order(self, money, *, description, reference_id, request_id=None):
@@ -784,6 +785,34 @@ def _completed_capture_event(paypal, event_id="WH-API-CAPTURE-1"):
             },
         },
     }
+
+
+def test_paypal_webhook_preserves_original_event_body_bytes(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token, request_id="raw-body-payment")
+    assert checkout.status_code == 200, checkout.text
+
+    paypal.completed = True
+    event = _completed_capture_event(
+        paypal, event_id="WH-RAW-BODY-1"
+    )
+    raw_body = json.dumps(event, indent=4, ensure_ascii=False).encode("utf-8")
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers={
+            **_paypal_webhook_headers(),
+            "content-type": "application/json",
+        },
+        content=raw_body,
+    )
+
+    assert response.status_code == 200, response.text
+    assert len(paypal.webhook_verifications) == 1
+    assert paypal.webhook_verifications[0][2] == raw_body
 
 
 def test_paypal_webhook_reconciles_verified_capture_without_capturing_again(tmp_path):

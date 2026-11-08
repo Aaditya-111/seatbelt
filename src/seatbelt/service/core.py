@@ -167,12 +167,13 @@ class GuardService:
         self,
         headers: dict[str, str],
         event: dict[str, object],
+        raw_event_body: bytes,
     ) -> dict[str, object]:
         """Verify and reconcile PayPal capture webhooks without initiating captures."""
         if self._paypal is None or not self._paypal_merchant_id:
             raise RuntimeError("PayPal checkout is not fully configured")
 
-        if not self._paypal.verify_webhook_signature(headers, event):
+        if not self._paypal.verify_webhook_signature(headers, event, raw_event_body):
             raise PermissionError("PayPal webhook signature verification failed")
 
         event_id = event.get("id")

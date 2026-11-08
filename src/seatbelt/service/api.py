@@ -235,7 +235,7 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
         }
 
         try:
-            result = service.handle_paypal_webhook(paypal_headers, event)
+            result = service.handle_paypal_webhook(paypal_headers, event, raw_body)
             return JSONResponse(status_code=200, content=result)
         except PermissionError:
             raise HTTPException(
