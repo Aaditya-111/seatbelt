@@ -165,6 +165,51 @@ class PayPalClient:
         )
 
     # -- orders ------------------------------------------------------------
+
+    def verify_webhook_signature(
+        self,
+        headers: dict[str, str],
+        event: dict[str, object],
+    ) -> bool:
+        """Verify a webhook using PayPal's official postback endpoint."""
+        webhook_id = self._settings.paypal_webhook_id
+        if not webhook_id:
+            raise RuntimeError("PayPal webhook ID is not configured")
+
+        header_names = {
+            "auth_algo": "PAYPAL-AUTH-ALGO",
+            "cert_url": "PAYPAL-CERT-URL",
+            "transmission_id": "PAYPAL-TRANSMISSION-ID",
+            "transmission_sig": "PAYPAL-TRANSMISSION-SIG",
+            "transmission_time": "PAYPAL-TRANSMISSION-TIME",
+        }
+
+        transmission = {}
+        for field, header_name in header_names.items():
+            value = headers.get(header_name)
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or len(value) > 4096
+                or "\r" in value
+                or "\n" in value
+            ):
+                raise ValueError(f"Missing or invalid PayPal header: {header_name}")
+            transmission[field] = value
+
+        payload = {
+            **transmission,
+            "webhook_id": webhook_id,
+            "webhook_event": event,
+        }
+
+        result = self._request(
+            "POST",
+            "/v1/notifications/verify-webhook-signature",
+            json=payload,
+        )
+        return result.get("verification_status") == "SUCCESS"
+
     def create_order(
         self,
         money: Money,

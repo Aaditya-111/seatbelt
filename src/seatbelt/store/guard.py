@@ -1147,6 +1147,117 @@ class GuardStore:
 
       return _to_record(updated)
 
+    def reconcile_paypal_webhook(
+        self,
+        *,
+        event_id: str,
+        event_type: str,
+        payment_id: str,
+        capture_id: str,
+        now: datetime | None = None,
+    ) -> tuple[PaymentRecord, bool]:
+        """Atomically record a verified PayPal capture and reconcile payment state."""
+        now = _now(now)
+
+        if (
+            not isinstance(event_id, str)
+            or not event_id
+            or len(event_id) > 128
+            or any(ord(char) < 33 or ord(char) > 126 for char in event_id)
+        ):
+            raise ValueError("Invalid PayPal webhook event ID")
+
+        if event_type != "PAYMENT.CAPTURE.COMPLETED":
+            raise ValueError("Unsupported PayPal webhook event type")
+
+        capture_id = _external_id(capture_id, "PayPal capture id")
+
+        with self._db.transaction() as conn:
+            existing = conn.execute(
+                "SELECT event_type, payment_id, capture_id "
+                "FROM paypal_webhook_events WHERE event_id = ?",
+                (event_id,),
+            ).fetchone()
+
+            if existing is not None:
+                if (
+                    existing["event_type"] != event_type
+                    or existing["payment_id"] != payment_id
+                    or existing["capture_id"] != capture_id
+                ):
+                    raise InvalidTransitionError(
+                        "PayPal webhook event ID was reused with different data"
+                    )
+                return _to_record(self._load_payment(conn, payment_id)), True
+
+            row = self._load_payment(conn, payment_id)
+            self._require_channel(
+                row, PaymentChannel.PAYPAL, "reconcile a PayPal webhook for"
+            )
+
+            capture_owner = conn.execute(
+                "SELECT payment_id FROM paypal_webhook_events WHERE capture_id = ?",
+                (capture_id,),
+            ).fetchone()
+
+            if capture_owner is not None and capture_owner["payment_id"] != payment_id:
+                raise InvalidTransitionError(
+                    "PayPal capture is already associated with another payment"
+                )
+
+            payment_capture_owner = conn.execute(
+                "SELECT payment_id FROM payments "
+                "WHERE paypal_capture_id = ? AND payment_id != ?",
+                (capture_id, payment_id),
+            ).fetchone()
+
+            if payment_capture_owner is not None:
+                raise InvalidTransitionError(
+                    "PayPal capture is already associated with another payment"
+                )
+
+            status = PaymentStatus(row["status"])
+
+            if status is PaymentStatus.CAPTURED:
+                if row["paypal_capture_id"] != capture_id:
+                    raise InvalidTransitionError(
+                        "PayPal capture does not match the recorded capture"
+                    )
+                updated = row
+                audit_event = "payment.paypal_webhook_reconciled"
+            else:
+                self._require_status(
+                    row,
+                    {PaymentStatus.AWAITING_PAYER, PaymentStatus.RESERVED},
+                    "reconcile a PayPal capture webhook for",
+                )
+                updated = self._update(
+                    conn,
+                    payment_id,
+                    now,
+                    status=PaymentStatus.CAPTURED,
+                    paypal_capture_id=capture_id,
+                )
+                audit_event = "payment.captured"
+
+            conn.execute(
+                "INSERT INTO paypal_webhook_events "
+                "(event_id, event_type, payment_id, capture_id, processed_at) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (event_id, event_type, payment_id, capture_id, now.isoformat()),
+            )
+
+            self._log(
+                conn,
+                audit_event,
+                "paypal_webhook",
+                payment_id,
+                {"capture_id": capture_id, "event_id": event_id},
+                now,
+            )
+
+            return _to_record(updated), False
+
     def mark_failed(
 
         self, payment_id: str, failure: str, *, now: datetime | None = None

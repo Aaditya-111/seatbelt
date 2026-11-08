@@ -565,6 +565,7 @@ def test_openapi_document_lists_paypal_endpoints(client):
     assert "/v1/paypal/payments" in paths
     assert "/v1/paypal/return" in paths
     assert "/v1/paypal/cancel" in paths
+    assert "/v1/paypal/webhook" in paths
 
 
 # ---------------- PayPal API lifecycle ----------------
@@ -582,6 +583,12 @@ class APIFakePayPal:
         self.completed = False
         self.order_status = "APPROVED"
         self.lose_capture_response = False
+        self.webhook_signature_valid = True
+        self.webhook_verifications = []
+
+    def verify_webhook_signature(self, headers, event):
+        self.webhook_verifications.append((headers, event))
+        return self.webhook_signature_valid
 
     def create_order(self, money, *, description, reference_id, request_id=None):
         self.reference_id = reference_id
@@ -747,6 +754,195 @@ def test_paypal_api_recovers_lost_capture_response_without_recapturing(tmp_path)
     assert retry.json()["status"] == "captured"
     assert retry.json()["paypal_capture_id"] == paypal.capture_id
     assert len(paypal.captured) == 1
+
+
+def _paypal_webhook_headers():
+    return {
+        "PAYPAL-AUTH-ALGO": "SHA256withRSA",
+        "PAYPAL-CERT-URL": "https://api.sandbox.paypal.com/cert",
+        "PAYPAL-TRANSMISSION-ID": "transmission-test-1",
+        "PAYPAL-TRANSMISSION-SIG": "test-signature",
+        "PAYPAL-TRANSMISSION-TIME": "2026-11-08T10:00:00Z",
+    }
+
+
+def _completed_capture_event(paypal, event_id="WH-API-CAPTURE-1"):
+    return {
+        "id": event_id,
+        "event_type": "PAYMENT.CAPTURE.COMPLETED",
+        "resource": {
+            "id": paypal.capture_id,
+            "status": "COMPLETED",
+            "amount": {
+                "value": "20.00",
+                "currency_code": "USD",
+            },
+            "supplementary_data": {
+                "related_ids": {
+                    "order_id": paypal.order_id,
+                },
+            },
+        },
+    }
+
+
+def test_paypal_webhook_reconciles_verified_capture_without_capturing_again(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+    payment_id = checkout.json()["payment_id"]
+
+    paypal.completed = True
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json=_completed_capture_event(paypal),
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "received": True,
+        "processed": True,
+        "duplicate": False,
+        "payment_id": payment_id,
+        "status": "captured",
+    }
+    assert paypal.captured == []
+    assert len(paypal.webhook_verifications) == 1
+
+    payment = client.store.get_payment_by_order_id(paypal.order_id)
+    assert payment.status.value == "captured"
+    assert payment.paypal_capture_id == paypal.capture_id
+
+
+def test_paypal_webhook_duplicate_delivery_is_idempotent(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+    paypal.completed = True
+    event = _completed_capture_event(paypal)
+
+    first = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json=event,
+    )
+    second = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json=event,
+    )
+
+    assert first.status_code == 200, first.text
+    assert second.status_code == 200, second.text
+    assert first.json()["duplicate"] is False
+    assert second.json()["duplicate"] is True
+    assert second.json()["status"] == "captured"
+    assert paypal.captured == []
+
+    payment = client.store.get_payment_by_order_id(paypal.order_id)
+    assert payment.paypal_capture_id == paypal.capture_id
+
+
+def test_paypal_webhook_rejects_capture_owned_by_another_payment(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    first_checkout = submit_paypal_api(client, token, request_id="first-payment")
+    assert first_checkout.status_code == 200, first_checkout.text
+    first_payment_id = first_checkout.json()["payment_id"]
+
+    # Simulate the first payment having been captured through the browser
+    # return path, before any webhook event was recorded for it.
+    with client.store._db.transaction() as conn:
+        conn.execute(
+            "UPDATE payments SET status = ?, paypal_capture_id = ? "
+            "WHERE payment_id = ?",
+            ("captured", paypal.capture_id, first_payment_id),
+        )
+
+    paypal.order_id = "ORDER-API-2"
+    second_checkout = submit_paypal_api(
+        client, token, request_id="second-payment"
+    )
+    assert second_checkout.status_code == 200, second_checkout.text
+    second_payment_id = second_checkout.json()["payment_id"]
+
+    paypal.completed = True
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json=_completed_capture_event(
+            paypal, event_id="WH-COLLIDING-CAPTURE-1"
+        ),
+    )
+
+    assert response.status_code == 409, response.text
+    second_payment = client.store.get_payment_by_order_id(paypal.order_id)
+    assert second_payment.payment_id == second_payment_id
+    assert second_payment.status.value == "awaiting_payer"
+    assert second_payment.paypal_capture_id is None
+    assert paypal.captured == []
+
+
+def test_paypal_webhook_rejects_invalid_signature_without_mutation(tmp_path):
+    paypal = APIFakePayPal()
+    paypal.webhook_signature_valid = False
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+    paypal.completed = True
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json=_completed_capture_event(paypal),
+    )
+
+    assert response.status_code == 401, response.text
+    payment = client.store.get_payment_by_order_id(paypal.order_id)
+    assert payment.status.value == "awaiting_payer"
+    assert payment.paypal_capture_id is None
+    assert paypal.captured == []
+
+
+def test_paypal_webhook_acknowledges_verified_unsupported_event(tmp_path):
+    paypal = APIFakePayPal()
+    client = make_client(tmp_path, paypal=paypal)
+    _, token = issue(client)
+
+    checkout = submit_paypal_api(client, token)
+    assert checkout.status_code == 200, checkout.text
+
+    response = client.post(
+        "/v1/paypal/webhook",
+        headers=_paypal_webhook_headers(),
+        json={
+            "id": "WH-UNSUPPORTED-1",
+            "event_type": "CHECKOUT.ORDER.APPROVED",
+            "resource": {},
+        },
+    )
+
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "received": True,
+        "processed": False,
+        "duplicate": False,
+        "reason": "unsupported_event_type",
+    }
+    payment = client.store.get_payment_by_order_id(paypal.order_id)
+    assert payment.status.value == "awaiting_payer"
+    assert paypal.captured == []
 
 
 def test_corrupted_audit_blocks_paypal_checkout_api(tmp_path):

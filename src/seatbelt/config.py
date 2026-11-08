@@ -33,6 +33,7 @@ class Settings(BaseSettings):
         max_length=128,
     )
 
+    paypal_webhook_id: str | None = Field(default=None, min_length=1, max_length=128)
     paypal_return_url: AnyHttpUrl
     paypal_cancel_url: AnyHttpUrl
 

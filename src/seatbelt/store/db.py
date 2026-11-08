@@ -10,7 +10,7 @@ from pathlib import Path
 
 from seatbelt.errors import StoreError
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS mandates (
@@ -59,6 +59,14 @@ CREATE TABLE IF NOT EXISTS audit_log (
     data       TEXT NOT NULL,
     prev_hash  TEXT NOT NULL,
     hash       TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS paypal_webhook_events (
+    event_id     TEXT PRIMARY KEY,
+    event_type   TEXT NOT NULL,
+    payment_id   TEXT NOT NULL REFERENCES payments(payment_id),
+    capture_id   TEXT NOT NULL UNIQUE,
+    processed_at TEXT NOT NULL
 );
 """
 

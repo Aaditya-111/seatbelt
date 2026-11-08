@@ -163,6 +163,123 @@ class GuardService:
             payment_channel=PaymentChannel.PAYPAL,
         )
 
+    def handle_paypal_webhook(
+        self,
+        headers: dict[str, str],
+        event: dict[str, object],
+    ) -> dict[str, object]:
+        """Verify and reconcile PayPal capture webhooks without initiating captures."""
+        if self._paypal is None or not self._paypal_merchant_id:
+            raise RuntimeError("PayPal checkout is not fully configured")
+
+        if not self._paypal.verify_webhook_signature(headers, event):
+            raise PermissionError("PayPal webhook signature verification failed")
+
+        event_id = event.get("id")
+        event_type = event.get("event_type")
+        if (
+            not isinstance(event_id, str)
+            or not event_id
+            or len(event_id) > 128
+            or not isinstance(event_type, str)
+            or not event_type
+            or len(event_type) > 128
+        ):
+            raise ValueError("PayPal webhook event identity is invalid")
+
+        if event_type != "PAYMENT.CAPTURE.COMPLETED":
+            return {
+                "received": True,
+                "processed": False,
+                "duplicate": False,
+                "reason": "unsupported_event_type",
+            }
+
+        resource = event.get("resource")
+        if not isinstance(resource, dict):
+            raise ValueError("PayPal capture webhook resource is invalid")
+
+        capture_id = resource.get("id")
+        capture_status = resource.get("status")
+        amount_data = resource.get("amount")
+        supplementary = resource.get("supplementary_data")
+        related_ids = (
+            supplementary.get("related_ids")
+            if isinstance(supplementary, dict)
+            else None
+        )
+        order_id = (
+            related_ids.get("order_id")
+            if isinstance(related_ids, dict)
+            else None
+        )
+
+        if (
+            not isinstance(capture_id, str)
+            or not capture_id
+            or len(capture_id) > 128
+            or capture_status != "COMPLETED"
+            or not isinstance(order_id, str)
+            or not order_id
+            or len(order_id) > 128
+            or not isinstance(amount_data, dict)
+            or not isinstance(amount_data.get("value"), str)
+            or not isinstance(amount_data.get("currency_code"), str)
+        ):
+            raise ValueError("PayPal capture webhook is missing required fields")
+
+        try:
+            event_amount = Decimal(amount_data["value"])
+        except Exception as exc:
+            raise ValueError("PayPal capture amount is invalid") from exc
+
+        if not event_amount.is_finite() or event_amount <= 0:
+            raise ValueError("PayPal capture amount is invalid")
+
+        record = self._store.get_payment_by_order_id(order_id)
+        if record.payment_channel is not PaymentChannel.PAYPAL:
+            raise NotFoundError("PayPal order not found")
+
+        expected_money = Money(amount=record.amount, currency=record.currency)
+        order = self._paypal.get_order(order_id)
+        order.verify_for_capture(
+            expected_order_id=order_id,
+            expected_reference_id=record.payment_id,
+            expected_money=expected_money,
+            expected_merchant_id=self._paypal_merchant_id,
+        )
+
+        if order.status != "COMPLETED" or len(order.purchase_units) != 1:
+            raise ValueError("PayPal has not confirmed a completed capture")
+
+        unit = order.purchase_units[0]
+        expected_amount = Decimal(expected_money.to_paypal_value())
+
+        if (
+            unit.capture_id != capture_id
+            or unit.capture_amount != expected_amount
+            or unit.capture_currency != expected_money.currency
+            or event_amount != expected_amount
+            or amount_data["currency_code"] != expected_money.currency
+        ):
+            raise ValueError("PayPal webhook capture does not match the verified order")
+
+        reconciled, duplicate = self._store.reconcile_paypal_webhook(
+            event_id=event_id,
+            event_type=event_type,
+            payment_id=record.payment_id,
+            capture_id=capture_id,
+            now=self._clock(),
+        )
+
+        return {
+            "received": True,
+            "processed": True,
+            "duplicate": duplicate,
+            "payment_id": reconciled.payment_id,
+            "status": reconciled.status.value,
+        }
+
     def process_paypal_return(self, order_id: str) -> PaymentRecord:
         """Verify a PayPal browser return against PayPal's Orders API."""
         record = self._store.get_payment_by_order_id(order_id)

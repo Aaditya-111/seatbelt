@@ -11,6 +11,7 @@ unexpected becomes a generic 500 (details go to the server log only).
 """
 
 import hmac
+import json
 import logging
 from datetime import timedelta
 from typing import Annotated
@@ -22,6 +23,7 @@ from pydantic import SecretStr, ValidationError
 
 from seatbelt import __version__
 from seatbelt.errors import (
+    PayPalError,
     AuditIntegrityError,
     IdempotencyConflictError,
     InvalidTransitionError,
@@ -194,6 +196,67 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
             currency=body.currency,
             description=body.description,
         )
+
+    @app.post("/v1/paypal/webhook", tags=["paypal"])
+    async def paypal_webhook(request: Request) -> JSONResponse:
+        """Receive PayPal events authenticated by PayPal postback verification."""
+        max_body_bytes = 256 * 1024
+        content_length = request.headers.get("content-length")
+
+        if content_length is not None:
+            try:
+                if int(content_length) > max_body_bytes:
+                    raise HTTPException(status_code=413, detail="Webhook body too large")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="Invalid content length")
+
+        content_type = request.headers.get("content-type", "")
+        if content_type.split(";", 1)[0].strip().lower() != "application/json":
+            raise HTTPException(status_code=415, detail="Expected application/json")
+
+        raw_body = await request.body()
+        if len(raw_body) > max_body_bytes:
+            raise HTTPException(status_code=413, detail="Webhook body too large")
+
+        try:
+            event = json.loads(raw_body)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            raise HTTPException(status_code=400, detail="Invalid webhook JSON")
+
+        if not isinstance(event, dict):
+            raise HTTPException(status_code=400, detail="Webhook JSON must be an object")
+
+        paypal_headers = {
+            "PAYPAL-AUTH-ALGO": request.headers.get("paypal-auth-algo", ""),
+            "PAYPAL-CERT-URL": request.headers.get("paypal-cert-url", ""),
+            "PAYPAL-TRANSMISSION-ID": request.headers.get("paypal-transmission-id", ""),
+            "PAYPAL-TRANSMISSION-SIG": request.headers.get("paypal-transmission-sig", ""),
+            "PAYPAL-TRANSMISSION-TIME": request.headers.get("paypal-transmission-time", ""),
+        }
+
+        try:
+            result = service.handle_paypal_webhook(paypal_headers, event)
+            return JSONResponse(status_code=200, content=result)
+        except PermissionError:
+            raise HTTPException(
+                status_code=401,
+                detail="PayPal webhook signature verification failed",
+            )
+        except NotFoundError:
+            raise HTTPException(status_code=404, detail="PayPal order not found")
+        except InvalidTransitionError:
+            raise HTTPException(
+                status_code=409,
+                detail="PayPal webhook conflicts with payment state",
+            )
+        except ValueError:
+            raise HTTPException(status_code=400, detail="Invalid PayPal webhook event")
+        except (PayPalError, RuntimeError):
+            log.exception("PayPal webhook processing is temporarily unavailable")
+            raise HTTPException(
+                status_code=503,
+                detail="PayPal webhook processing is temporarily unavailable",
+            )
 
     @app.get("/v1/paypal/return", response_model=PaymentRecord, tags=["paypal"])
     def paypal_return(

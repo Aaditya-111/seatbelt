@@ -245,7 +245,7 @@ def test_v1_database_is_upgraded_without_losing_payment_data(tmp_path):
             for row in conn.execute("PRAGMA table_info(payments)").fetchall()
         }
 
-    assert version == 3
+    assert version == 4
     assert "paypal_approve_url" in columns
     assert "payment_channel" in columns
     assert "paypal_approve_url" in columns
