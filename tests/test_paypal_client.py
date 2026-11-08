@@ -224,3 +224,121 @@ def test_network_errors_are_retried_then_raised(settings):
     with pytest.raises(PayPalError, match="Network error"):
         client.get_order("ORD1")
     assert calls["n"] == settings.paypal_max_retries + 1
+
+WEBHOOK_HEADERS = {
+    "PAYPAL-AUTH-ALGO": "SHA256withRSA",
+    "PAYPAL-CERT-URL": "https://api.paypal.com/certs/CERT-123",
+    "PAYPAL-TRANSMISSION-ID": "transmission-123",
+    "PAYPAL-TRANSMISSION-SIG": "signature-123",
+    "PAYPAL-TRANSMISSION-TIME": "2026-11-08T05:19:25Z",
+}
+
+
+def test_verify_webhook_signature_sends_exact_event_body(settings):
+    settings = settings.model_copy(
+        update={"paypal_webhook_id": "WEBHOOK-ID-123"}
+    )
+    client, rec, _ = make_client(
+        settings,
+        {
+            "POST /v1/oauth2/token": [(200, TOKEN)],
+            "POST /v1/notifications/verify-webhook-signature": [
+                (200, {"verification_status": "SUCCESS"})
+            ],
+        },
+    )
+
+    raw_event = (
+        b'{ "id" : "WH-123", "event_type" : '
+        b'"PAYMENT.CAPTURE.COMPLETED", "resource" : {"id":"CAP-1"} }'
+    )
+    event = json.loads(raw_event)
+
+    assert client.verify_webhook_signature(
+        WEBHOOK_HEADERS, event, raw_event
+    ) is True
+
+    verification_request = rec.calls[-1]
+    assert verification_request.url.path == (
+        "/v1/notifications/verify-webhook-signature"
+    )
+    assert verification_request.headers["Authorization"] == "Bearer tok-1"
+    assert verification_request.headers["Content-Type"] == "application/json"
+
+    payload = verification_request.content
+    prefix = (
+        b'{"auth_algo":"SHA256withRSA",'
+        b'"cert_url":"https://api.paypal.com/certs/CERT-123",'
+        b'"transmission_id":"transmission-123",'
+        b'"transmission_sig":"signature-123",'
+        b'"transmission_time":"2026-11-08T05:19:25Z",'
+        b'"webhook_id":"WEBHOOK-ID-123","webhook_event":'
+    )
+    assert payload == prefix + raw_event + b"}"
+
+
+def test_verify_webhook_signature_returns_false_when_paypal_rejects(
+    settings,
+):
+    settings = settings.model_copy(
+        update={"paypal_webhook_id": "WEBHOOK-ID-123"}
+    )
+    client, _, _ = make_client(
+        settings,
+        {
+            "POST /v1/oauth2/token": [(200, TOKEN)],
+            "POST /v1/notifications/verify-webhook-signature": [
+                (200, {"verification_status": "FAILURE"})
+            ],
+        },
+    )
+
+    raw_event = b'{"id":"WH-123"}'
+
+    assert client.verify_webhook_signature(
+        WEBHOOK_HEADERS, json.loads(raw_event), raw_event
+    ) is False
+
+
+@pytest.mark.parametrize(
+    ("header_name", "header_value"),
+    [
+        ("PAYPAL-AUTH-ALGO", ""),
+        ("PAYPAL-CERT-URL", "https://example.com/cert\r\nInjected: yes"),
+        ("PAYPAL-TRANSMISSION-ID", " "),
+        ("PAYPAL-TRANSMISSION-SIG", ""),
+        ("PAYPAL-TRANSMISSION-TIME", ""),
+    ],
+)
+def test_verify_webhook_signature_rejects_invalid_headers(
+    settings, header_name, header_value
+):
+    settings = settings.model_copy(
+        update={"paypal_webhook_id": "WEBHOOK-ID-123"}
+    )
+    client, rec, _ = make_client(
+        settings,
+        {"POST /v1/oauth2/token": [(200, TOKEN)]},
+    )
+    headers = {**WEBHOOK_HEADERS, header_name: header_value}
+
+    with pytest.raises(ValueError):
+        client.verify_webhook_signature(
+            headers, {"id": "WH-123"}, b'{"id":"WH-123"}'
+        )
+
+    assert not rec.calls
+
+
+def test_verify_webhook_signature_requires_configured_webhook_id(settings):
+    client, rec, _ = make_client(
+        settings,
+        {"POST /v1/oauth2/token": [(200, TOKEN)]},
+    )
+
+    with pytest.raises(RuntimeError, match="webhook ID is not configured"):
+        client.verify_webhook_signature(
+            WEBHOOK_HEADERS, {"id": "WH-123"}, b'{"id":"WH-123"}'
+        )
+
+    assert not rec.calls
