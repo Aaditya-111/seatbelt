@@ -76,6 +76,14 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
     )
     app.state.service = service
 
+    from seatbelt.service.request_limits import RequestBodyLimitMiddleware
+
+    app.add_middleware(
+        RequestBodyLimitMiddleware,
+        max_body_bytes=1024 * 1024,
+        paypal_webhook_max_body_bytes=256 * 1024,
+    )
+
     from seatbelt.service.rate_limit import InMemoryRateLimiter
 
     app.state.rate_limiter = InMemoryRateLimiter()

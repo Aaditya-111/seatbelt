@@ -1464,3 +1464,21 @@ def test_payment_endpoint_returns_429_after_rate_limit(client):
     assert responses[30].json() == {
         "detail": "Too many requests. Please try again later."
     }
+
+def test_api_rejects_request_body_over_one_megabyte(client):
+ response = client.post(
+"/v1/payments",
+content=b"x" * (1024 * 1024 + 1),
+headers={"Content-Type": "application/json"},
+)
+ assert response.status_code == 413
+ assert response.json() == {"detail": "Request body too large"}
+
+def test_api_rejects_request_body_over_one_megabyte(client):
+    response = client.post(
+        "/v1/payments",
+        content=b"x" * (1024 * 1024 + 1),
+        headers={"Content-Type": "application/json"},
+    )
+    assert response.status_code == 413
+    assert response.json() == {"detail": "Request body too large"}
