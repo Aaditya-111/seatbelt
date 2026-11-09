@@ -353,11 +353,14 @@ def test_invalid_payment_requests_are_rejected(client, overrides):
     assert pay(client, token, **overrides).status_code == 422
 
 
-def test_executor_failure_is_reported_as_a_failed_payment(tmp_path):
+def test_executor_failure_is_reported_without_exposing_internal_details(tmp_path):
     client = make_client(tmp_path, FakeExecutor(fail_for_payees={"shop-b"}))
     _, token = issue(client)
     body = pay(client, token, payee="shop-b").json()
+
     assert body["status"] == "failed"
+    assert body["failure"] == "Payment execution failed"
+    assert "simulated failure" not in str(body)
 
 
 # ---------------- reading payments ----------------

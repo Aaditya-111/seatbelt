@@ -112,7 +112,7 @@ def test_rejecting_releases_the_budget(store, mandate):
 
 def test_failed_payment_releases_the_budget(store, mandate):
     p = submit(store, mandate, amount="30")
-    store.mark_failed(p.payment_id, "PayPal said no", now=NOW)
+    store.mark_failed(p.payment_id, now=NOW)
     assert store.get_mandate(mandate.mandate_id).committed == 0
 
 
@@ -156,7 +156,7 @@ def test_full_happy_lifecycle(store, mandate):
     [
         ("pending", lambda s, pid: s.mark_captured(pid, "C1", now=NOW)),
         ("pending", lambda s, pid: s.attach_order(pid, "O1", now=NOW)),
-        ("pending", lambda s, pid: s.mark_failed(pid, "x", now=NOW)),
+        ("pending", lambda s, pid: s.mark_failed(pid, now=NOW)),
         ("reserved", lambda s, pid: s.approve_payment(pid, "boss", now=NOW)),
         ("reserved", lambda s, pid: s.reject_payment(pid, "boss", now=NOW)),
         ("denied", lambda s, pid: s.approve_payment(pid, "boss", now=NOW)),
@@ -179,7 +179,7 @@ def test_terminal_states_stay_terminal(store, mandate):
     store.mark_captured(p.payment_id, "C1", now=NOW)
     for action in (
         lambda: store.mark_captured(p.payment_id, "C2", now=NOW),
-        lambda: store.mark_failed(p.payment_id, "x", now=NOW),
+        lambda: store.mark_failed(p.payment_id, now=NOW),
         lambda: store.approve_payment(p.payment_id, "boss", now=NOW),
     ):
         with pytest.raises(InvalidTransitionError):

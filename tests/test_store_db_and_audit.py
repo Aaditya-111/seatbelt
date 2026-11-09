@@ -1,3 +1,4 @@
+import json
 import sqlite3
 from datetime import datetime, timezone
 
@@ -601,10 +602,22 @@ def test_paypal_webhook_cannot_resurrect_failed_payment(db):
 
     failed = store.mark_failed(
         payment.payment_id,
-        "simulated provider failure",
         now=T,
     )
     assert failed.status.value == "failed"
+    assert failed.failure == "Payment execution failed"
+
+    with db.transaction(write=False) as conn:
+        failure_event = conn.execute(
+            "SELECT data FROM audit_log "
+            "WHERE event = 'payment.failed' AND subject_id = ?",
+            (payment.payment_id,),
+        ).fetchone()
+
+    assert failure_event is not None
+    assert json.loads(failure_event["data"]) == {
+        "failure": "Payment execution failed"
+    }
 
     with db.transaction(write=False) as conn:
         audit_before = conn.execute(

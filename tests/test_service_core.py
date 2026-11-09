@@ -191,7 +191,8 @@ def test_executor_failure_marks_the_payment_failed_and_frees_the_budget(tmp_path
     svc, _, _ = build(tmp_path, FakeExecutor(fail_for_payees={"shop-b"}))
     mandate, token = issue(svc)
     p = pay(svc, token, payee="shop-b", amount="30")
-    assert p.status is PaymentStatus.FAILED and "simulated failure" in p.failure
+    assert p.status is PaymentStatus.FAILED
+    assert p.failure == "Payment execution failed"
     assert svc.get_mandate(mandate.mandate_id).committed == 0
 
 

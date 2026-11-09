@@ -1262,7 +1262,7 @@ class GuardStore:
 
     def mark_failed(
 
-        self, payment_id: str, failure: str, *, now: datetime | None = None
+        self, payment_id: str, *, now: datetime | None = None
 
     ) -> PaymentRecord:
 
@@ -1278,11 +1278,12 @@ class GuardStore:
 
             updated = self._update(
 
-                conn, payment_id, now, status=PaymentStatus.FAILED, failure=failure[:300]
+                conn, payment_id, now, status=PaymentStatus.FAILED,
+                failure="Payment execution failed"
 
             )
 
-            self._log(conn, "payment.failed", "system", payment_id, {"failure": failure[:300]}, now)
+            self._log(conn, "payment.failed", "system", payment_id, {"failure": "Payment execution failed"}, now)
 
             return _to_record(updated)
 

@@ -571,7 +571,6 @@ class GuardService:
                 log.warning("payment failed payment_id=%s error_type=%s", current.payment_id, type(exc).__name__)
                 return self._store.mark_failed(
                     current.payment_id,
-                    str(exc),
                     now=self._clock(),
                 )
             except Exception as exc:
