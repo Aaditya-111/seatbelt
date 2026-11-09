@@ -1444,3 +1444,10 @@ def test_agent_cannot_spoof_agent_id_in_payment_request(client):
     assert response.status_code in (200, 422)
     if response.status_code == 200:
         assert response.json()['agent_id'] == 'agent-1'
+
+def test_basic_auth_scheme_is_rejected_for_admin_endpoint(client):
+    response = client.get(
+        "/v1/audit/verify",
+        headers={"Authorization": "Basic YWRtaW46cGFzcw=="},
+    )
+    assert response.status_code == 401
