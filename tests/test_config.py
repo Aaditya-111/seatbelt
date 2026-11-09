@@ -26,8 +26,45 @@ def test_live_is_blocked_without_opt_in():
 
 
 def test_live_allowed_with_explicit_opt_in():
-    s = Settings(**BASE, paypal_env="live", allow_live=True)
+    s = Settings(
+        **BASE,
+        paypal_env="live",
+        allow_live=True,
+        paypal_expected_merchant_id="live-merchant",
+        paypal_webhook_id="live-webhook",
+    )
     assert s.paypal_base_url == "https://api-m.paypal.com"
+
+
+def test_live_requires_expected_merchant_id():
+    with pytest.raises(ValidationError, match="PAYPAL_EXPECTED_MERCHANT_ID"):
+        Settings(
+            **BASE,
+            paypal_env="live",
+            allow_live=True,
+            paypal_webhook_id="live-webhook",
+        )
+
+
+def test_live_requires_webhook_id():
+    with pytest.raises(ValidationError, match="PAYPAL_WEBHOOK_ID"):
+        Settings(
+            **BASE,
+            paypal_env="live",
+            allow_live=True,
+            paypal_expected_merchant_id="live-merchant",
+        )
+
+
+def test_live_requires_https_callback_urls():
+    with pytest.raises(ValidationError, match="HTTPS"):
+        Settings(
+            **{**BASE, "paypal_return_url": "http://a.test/ok"},
+            paypal_env="live",
+            allow_live=True,
+            paypal_expected_merchant_id="live-merchant",
+            paypal_webhook_id="live-webhook",
+        )
 
 
 def test_missing_credentials_fail_loudly(monkeypatch):

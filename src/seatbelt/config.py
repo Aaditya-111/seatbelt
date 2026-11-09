@@ -54,18 +54,36 @@ class Settings(BaseSettings):
     log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = "INFO"
     log_json: bool = False
 
+    @field_validator("paypal_client_id", "paypal_client_secret")
+    @classmethod
+    def _paypal_credentials_must_be_nonblank(
+        cls, v: SecretStr
+    ) -> SecretStr:
+        value = v.get_secret_value()
+        if not value or not value.strip():
+            raise ValueError("PayPal credentials cannot be blank")
+        if value != value.strip():
+            raise ValueError("PayPal credentials cannot contain surrounding whitespace")
+        return v
+
     @field_validator("mandate_signing_key")
     @classmethod
     def _signing_key_is_long_enough(cls, v: SecretStr) -> SecretStr:
-        if len(v.get_secret_value()) < 32:
+        value = v.get_secret_value()
+        if len(value) < 32:
             raise ValueError("MANDATE_SIGNING_KEY must be at least 32 characters")
+        if not value.strip() or value != value.strip():
+            raise ValueError("MANDATE_SIGNING_KEY cannot be blank or whitespace-padded")
         return v
 
     @field_validator("admin_api_key")
     @classmethod
     def _admin_key_is_long_enough(cls, v: SecretStr) -> SecretStr:
-        if len(v.get_secret_value()) < 24:
+        value = v.get_secret_value()
+        if len(value) < 24:
             raise ValueError("ADMIN_API_KEY must be at least 24 characters")
+        if not value.strip() or value != value.strip():
+            raise ValueError("ADMIN_API_KEY cannot be blank or whitespace-padded")
         return v
     @field_validator("paypal_expected_merchant_id")
     @classmethod
@@ -85,11 +103,33 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _refuse_live_without_opt_in(self) -> Settings:
-        if self.paypal_env == "live" and not self.allow_live:
+        if self.paypal_env != "live":
+            return self
+
+        if not self.allow_live:
             raise ValueError(
                 "PAYPAL_ENV=live is blocked. Set ALLOW_LIVE=true only if you "
                 "really intend to move real money."
             )
+
+        if not self.paypal_expected_merchant_id:
+            raise ValueError(
+                "PAYPAL_EXPECTED_MERCHANT_ID is required in live mode"
+            )
+
+        if not self.paypal_webhook_id:
+            raise ValueError(
+                "PAYPAL_WEBHOOK_ID is required in live mode"
+            )
+
+        if (
+            self.paypal_return_url.scheme != "https"
+            or self.paypal_cancel_url.scheme != "https"
+        ):
+            raise ValueError(
+                "PayPal live callback URLs must use HTTPS"
+            )
+
         return self
 
 
