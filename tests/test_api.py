@@ -1451,3 +1451,16 @@ def test_basic_auth_scheme_is_rejected_for_admin_endpoint(client):
         headers={"Authorization": "Basic YWRtaW46cGFzcw=="},
     )
     assert response.status_code == 401
+
+def test_payment_endpoint_returns_429_after_rate_limit(client):
+    responses = [
+        client.post("/v1/payments")
+        for _ in range(31)
+    ]
+
+    assert all(response.status_code != 429 for response in responses[:30])
+    assert responses[30].status_code == 429
+    assert int(responses[30].headers["Retry-After"]) > 0
+    assert responses[30].json() == {
+        "detail": "Too many requests. Please try again later."
+    }

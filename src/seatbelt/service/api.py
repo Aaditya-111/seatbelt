@@ -76,6 +76,37 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
     )
     app.state.service = service
 
+    from seatbelt.service.rate_limit import InMemoryRateLimiter
+
+    app.state.rate_limiter = InMemoryRateLimiter()
+    rate_limits = {
+        ("POST", "/v1/mandates"): 10,
+        ("POST", "/v1/payments"): 30,
+        ("POST", "/v1/paypal/payments"): 30,
+        ("POST", "/v1/paypal/webhook"): 60,
+    }
+
+    @app.middleware("http")
+    async def enforce_rate_limits(request, call_next):
+        from fastapi.responses import JSONResponse
+
+        limit = rate_limits.get((request.method, request.url.path))
+        if limit is not None:
+            client_ip = request.client.host if request.client else "unknown"
+            allowed, retry_after = app.state.rate_limiter.allow(
+                f"{request.method}:{request.url.path}:{client_ip}",
+                limit=limit,
+                window_seconds=60,
+            )
+            if not allowed:
+                return JSONResponse(
+                    status_code=429,
+                    content={"detail": "Too many requests. Please try again later."},
+                    headers={"Retry-After": str(retry_after)},
+                )
+
+        return await call_next(request)
+
     bearer = HTTPBearer(auto_error=False)
     admin_key = admin_api_key.get_secret_value().encode("utf-8")
     Creds = Annotated[HTTPAuthorizationCredentials | None, Depends(bearer)]
