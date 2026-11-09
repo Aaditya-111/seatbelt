@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from seatbelt.service import ExecutionResult, FakeExecutor, GuardService, create_app
+from seatbelt.errors import NotFoundError
 from seatbelt.store import Database, GuardStore
 from seatbelt.paypal.models import CaptureResult, Order, OrderPurchaseUnit
 
@@ -465,7 +466,7 @@ def test_checkpoint_endpoint_requires_configured_path(client):
 
     assert response.status_code == 503
     assert response.json() == {
-        "detail": "AUDIT_CHECKPOINT_PATH is not configured"
+        "detail": "Audit checkpoint is temporarily unavailable"
     }
 # ---------------- PayPal API security boundaries ----------------
 
@@ -1485,3 +1486,51 @@ def test_api_rejects_request_body_over_one_megabyte(client):
     )
     assert response.status_code == 413
     assert response.json() == {"detail": "Request body too large"}
+
+
+def test_registered_domain_error_does_not_expose_exception_message(
+    client, monkeypatch
+):
+    secret = "internal-database-password-should-never-leak"
+
+    def raise_internal_error(self, token):
+        raise NotFoundError(secret)
+
+    monkeypatch.setattr(GuardService, "authenticate_agent", raise_internal_error)
+
+    response = pay(client, "test-token")
+
+    assert response.status_code == 404
+    assert secret not in response.text
+    assert response.json()["detail"] == "The requested resource was not found."
+
+
+def test_paypal_cancel_does_not_expose_provider_exception_message(
+    tmp_path, monkeypatch
+):
+    secret = "provider-debug-token-should-never-leak"
+    client = make_client(
+        tmp_path,
+        paypal=APIFakePayPal(),
+        raise_exceptions=False,
+    )
+
+    def raise_provider_error(self, token):
+        raise ValueError(secret)
+
+    monkeypatch.setattr(
+        GuardService,
+        "process_paypal_cancel",
+        raise_provider_error,
+    )
+
+    response = client.get(
+        "/v1/paypal/cancel",
+        params={"token": "test-order"},
+    )
+
+    assert response.status_code == 409
+    assert secret not in response.text
+    assert response.json()["detail"] == (
+        "PayPal cancellation could not be completed"
+    )

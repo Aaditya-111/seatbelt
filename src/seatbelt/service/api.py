@@ -63,6 +63,18 @@ _STATUS_BY_ERROR: list[tuple[type[Exception], int]] = [
     (InvalidTransitionError, 409),
 ]
 
+_SAFE_ERROR_DETAILS: dict[type[Exception], str] = {
+    MandateRevokedError: "This mandate has been revoked.",
+    MalformedMandateError: "The mandate token is malformed.",
+    MandateSignatureError: "The mandate signature is invalid.",
+    MandateExpiredError: "The mandate has expired.",
+    MandateNotYetValidError: "The mandate is not yet valid.",
+    MandateError: "The mandate is invalid or cannot be used.",
+    NotFoundError: "The requested resource was not found.",
+    IdempotencyConflictError: "The request ID was already used with different details.",
+    InvalidTransitionError: "This action is not allowed in the current payment state.",
+}
+
 
 def _unauthorized(detail: str) -> HTTPException:
     return HTTPException(status_code=401, detail=detail, headers={"WWW-Authenticate": "Bearer"})
@@ -142,7 +154,9 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
     def _register(exc_type: type[Exception], status: int) -> None:
         @app.exception_handler(exc_type)
         async def _handler(_: Request, exc: Exception) -> JSONResponse:
-            return JSONResponse(status_code=status, content={"detail": str(exc)})
+            log.warning("request rejected error_type=%s", type(exc).__name__)
+            detail = _SAFE_ERROR_DETAILS[exc_type]
+            return JSONResponse(status_code=status, content={"detail": detail})
 
     for exc_type, status in _STATUS_BY_ERROR:
         _register(exc_type, status)
@@ -309,11 +323,22 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
     def paypal_cancel(
         token: Annotated[str, Query(min_length=1, max_length=128)]
     ) -> PaymentRecord:
-          # The order ID is untrusted until resolved from our DB and verified with PayPal.
-          try:
-             return service.process_paypal_cancel(token)
-          except ValueError as exc:
-             raise HTTPException(status_code=409, detail=str(exc)) from exc
+        # The order ID is untrusted until resolved from our DB and verified with PayPal.
+        try:
+            return service.process_paypal_cancel(token)
+        except ValueError as exc:
+            # Preserve the known, user-actionable state conflict. Do not expose
+            # arbitrary verification/provider exception text.
+            if str(exc) == "PayPal order is not in a cancellable state":
+                detail = "PayPal order is not in a cancellable state"
+            else:
+                detail = "PayPal cancellation could not be completed"
+            log.warning(
+                "PayPal cancellation rejected error_type=%s",
+                type(exc).__name__,
+            )
+            raise HTTPException(status_code=409, detail=detail) from exc
+
     @app.get("/v1/payments/{payment_id}", response_model=PaymentRecord, tags=["agent", "admin"])
     def get_payment(
         payment_id: str, who: Annotated[Mandate | None, Depends(admin_or_agent)]
@@ -389,8 +414,16 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
         try:
             return service.create_audit_checkpoint()
         except RuntimeError as exc:
-            raise HTTPException(status_code=503, detail=str(exc)) from exc
+            log.error("audit checkpoint unavailable error_type=%s", type(exc).__name__)
+            raise HTTPException(
+                status_code=503,
+                detail="Audit checkpoint is temporarily unavailable",
+            ) from exc
         except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
+            log.warning("audit checkpoint rejected error_type=%s", type(exc).__name__)
+            raise HTTPException(
+                status_code=409,
+                detail="Audit checkpoint could not be created",
+            ) from exc
 
     return app
