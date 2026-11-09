@@ -127,3 +127,25 @@ def test_server_defaults_are_local_only():
 def test_server_port_bounds(bad):
     with pytest.raises(ValidationError):
         Settings(**{**BASE, "server_port": bad})
+
+@pytest.mark.parametrize("field", ["paypal_client_id", "paypal_client_secret"])
+@pytest.mark.parametrize("bad", ["", "   ", " value", "value "])
+def test_paypal_credentials_reject_blank_or_padded_values(field, bad):
+    with pytest.raises(ValidationError):
+        Settings(**{**BASE, field: bad})
+
+
+@pytest.mark.parametrize(
+    ("field", "bad"),
+    [
+        ("mandate_signing_key", " " * 40),
+        ("mandate_signing_key", " " + "k" * 39),
+        ("mandate_signing_key", "k" * 39 + " "),
+        ("admin_api_key", " " * 30),
+        ("admin_api_key", " " + "a" * 29),
+        ("admin_api_key", "a" * 29 + " "),
+    ],
+)
+def test_security_keys_reject_blank_or_padded_values(field, bad):
+    with pytest.raises(ValidationError):
+        Settings(**{**BASE, field: bad})
