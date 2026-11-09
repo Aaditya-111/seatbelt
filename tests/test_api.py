@@ -1425,3 +1425,22 @@ def test_paypal_webhook_maps_verification_outage_to_503(
         "detail": "PayPal webhook processing is temporarily unavailable"
     }
     assert "simulated PayPal" not in response.text
+
+def test_agent_cannot_spoof_agent_id_in_payment_request(client):
+    _, token = issue(client, agent_id="agent-1")
+
+    response = pay(client, token, agent_id="agent-2")
+
+    # Extra identity fields must never override the signed mandate.
+    assert response.status_code in (200, 422)
+
+    if response.status_code == 200:
+        assert response.json()["agent_id"] == "agent-1"
+
+
+def test_agent_cannot_spoof_agent_id_in_payment_request(client):
+    _, token = issue(client, agent_id='agent-1')
+    response = pay(client, token, agent_id='agent-2')
+    assert response.status_code in (200, 422)
+    if response.status_code == 200:
+        assert response.json()['agent_id'] == 'agent-1'
