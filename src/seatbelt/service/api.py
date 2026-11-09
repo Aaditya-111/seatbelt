@@ -151,7 +151,7 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
     async def _audit_integrity_error(
         _: Request, exc: AuditIntegrityError
     ) -> JSONResponse:
-        log.error("payment operations blocked by audit integrity failure: %s", exc)
+        log.error("payment operations blocked by audit integrity failure error_type=%s", type(exc).__name__)
         return JSONResponse(
             status_code=503,
             content={
@@ -168,7 +168,7 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
 
     @app.exception_handler(Exception)
     async def _unexpected(_: Request, exc: Exception) -> JSONResponse:
-        log.exception("unhandled error", exc_info=exc)
+        log.error("unhandled error type=%s", type(exc).__name__)
         return JSONResponse(status_code=500, content={"detail": "internal server error"})
 
     # ------------------------------------------------------------ public
@@ -290,8 +290,8 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
             )
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid PayPal webhook event")
-        except (PayPalError, RuntimeError):
-            log.exception("PayPal webhook processing is temporarily unavailable")
+        except (PayPalError, RuntimeError) as exc:
+            log.error("PayPal webhook processing unavailable error_type=%s", type(exc).__name__)
             raise HTTPException(
                 status_code=503,
                 detail="PayPal webhook processing is temporarily unavailable",

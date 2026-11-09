@@ -568,14 +568,14 @@ class GuardService:
             try:
                 result = self._executor.execute(current)
             except ExecutionError as exc:
-                log.warning("payment %s failed: %s", current.payment_id, exc)
+                log.warning("payment failed payment_id=%s error_type=%s", current.payment_id, type(exc).__name__)
                 return self._store.mark_failed(
                     current.payment_id,
                     str(exc),
                     now=self._clock(),
                 )
-            except Exception:
-                log.exception("payment %s: executor crashed", current.payment_id)
+            except Exception as exc:
+                log.error("payment executor crashed payment_id=%s error_type=%s", current.payment_id, type(exc).__name__)
                 raise
 
             if result.order_id:
