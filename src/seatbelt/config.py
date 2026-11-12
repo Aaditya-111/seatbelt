@@ -40,6 +40,10 @@ class Settings(BaseSettings):
     paypal_timeout_seconds: float = Field(default=20.0, gt=0, le=120)
     paypal_max_retries: int = Field(default=3, ge=0, le=6)
 
+    ai_base_url: AnyHttpUrl = "http://127.0.0.1:11434"
+    ai_model: str = Field(default="qwen2.5:3b", min_length=1, max_length=128)
+    ai_timeout_seconds: float = Field(default=45.0, gt=0, le=180)
+
     mandate_signing_key: SecretStr
     mandate_max_ttl_hours: int = Field(default=24, ge=1, le=720)
 

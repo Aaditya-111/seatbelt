@@ -68,3 +68,11 @@ class AuditEntry(BaseModel):
     subject_id: str
     data: dict[str, Any]
     hash: str
+
+PurchaseText = Annotated[str, StringConstraints(
+    strip_whitespace=True, min_length=1, max_length=2000
+)]
+
+class InterpretPaymentBody(_Strict):
+    """Untrusted natural-language purchase request."""
+    purchase_text: PurchaseText

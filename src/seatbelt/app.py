@@ -8,6 +8,7 @@ from fastapi import FastAPI
 
 from seatbelt.config import Settings, get_settings
 from seatbelt.paypal.client import PayPalClient
+from seatbelt.service.ai import OllamaPaymentInterpreter
 from seatbelt.service.api import create_app
 from seatbelt.service.core import GuardService
 from seatbelt.store.db import Database
@@ -51,4 +52,9 @@ def build_app(settings: Settings | None = None) -> FastAPI:
     return create_app(
         service,
         config.admin_api_key,
+        ai_interpreter=OllamaPaymentInterpreter(
+            base_url=str(config.ai_base_url),
+            model=config.ai_model,
+            timeout_seconds=config.ai_timeout_seconds,
+        ),
     )

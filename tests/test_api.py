@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from pydantic import SecretStr
 
 from seatbelt.service import ExecutionResult, FakeExecutor, GuardService, create_app
+from seatbelt.service.ai import AIUnavailableError, PaymentIntent
 from seatbelt.errors import NotFoundError
 from seatbelt.store import Database, GuardStore
 from seatbelt.paypal.models import CaptureResult, Order, OrderPurchaseUnit
@@ -31,7 +32,9 @@ class ExplodingExecutor:
         raise RuntimeError("super secret internal detail")
 
 
-def make_client(tmp_path, executor=None, raise_exceptions=True, paypal=None):
+def make_client(
+    tmp_path, executor=None, raise_exceptions=True, paypal=None, ai_interpreter=None
+):
     db = Database(tmp_path / "api.db")
     db.initialize()
     clock = Clock()
@@ -44,7 +47,9 @@ def make_client(tmp_path, executor=None, raise_exceptions=True, paypal=None):
         paypal_client=paypal,
         paypal_expected_merchant_id="MERCHANT-1" if paypal is not None else None,
     )
-    app = create_app(service, SecretStr(ADMIN_KEY))
+    app = create_app(
+        service, SecretStr(ADMIN_KEY), ai_interpreter=ai_interpreter
+    )
     client = TestClient(app, raise_server_exceptions=raise_exceptions)
     client.clock = clock
     client.executor = service._executor
@@ -1534,3 +1539,147 @@ def test_paypal_cancel_does_not_expose_provider_exception_message(
     assert response.json()["detail"] == (
         "PayPal cancellation could not be completed"
     )
+
+
+# ---------------- local AI payment interpretation ----------------
+class FakePaymentInterpreter:
+    def __init__(self, intent=None, error=None):
+        self.intent = intent or PaymentIntent(
+            status="ready",
+            payee="shop-a",
+            amount="25.00",
+            currency="USD",
+            description="conference tickets",
+            quantity=2,
+            missing_fields=[],
+            clarification_question=None,
+        )
+        self.error = error
+        self.calls = []
+
+    async def interpret(self, purchase_text):
+        self.calls.append(purchase_text)
+        if self.error is not None:
+            raise self.error
+        return self.intent
+
+
+def test_ai_interpret_returns_proposal_for_authorized_payee(tmp_path):
+    interpreter = FakePaymentInterpreter()
+    client = make_client(tmp_path, ai_interpreter=interpreter)
+    _, token = issue(client)
+
+    response = client.post(
+        "/v1/agent/interpret",
+        headers=bearer(token),
+        json={"purchase_text": "Buy two tickets from shop-a for 25 USD"},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["status"] == "ready"
+    assert result["payee"] == "shop-a"
+    assert result["amount"] == "25.00"
+    assert interpreter.calls == ["Buy two tickets from shop-a for 25 USD"]
+
+
+def test_ai_interpret_turns_unauthorized_payee_into_clarification(tmp_path):
+    interpreter = FakePaymentInterpreter(
+        intent=PaymentIntent(
+            status="ready",
+            payee="EventHub",
+            amount="25.00",
+            currency="USD",
+            description="conference tickets",
+            quantity=2,
+            missing_fields=[],
+            clarification_question=None,
+        )
+    )
+    client = make_client(tmp_path, ai_interpreter=interpreter)
+    _, token = issue(client)
+
+    response = client.post(
+        "/v1/agent/interpret",
+        headers=bearer(token),
+        json={"purchase_text": "Buy tickets from EventHub for 25 USD"},
+    )
+
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert result["status"] == "needs_clarification"
+    assert result["payee"] is None
+    assert "payee" in result["missing_fields"]
+    assert "not authorized" in result["clarification_question"].lower()
+
+
+def test_ai_interpret_requires_agent_credentials(tmp_path):
+    client = make_client(tmp_path, ai_interpreter=FakePaymentInterpreter())
+
+    response = client.post(
+        "/v1/agent/interpret",
+        json={"purchase_text": "Buy tickets from shop-a for 25 USD"},
+    )
+
+    assert response.status_code == 401
+
+
+def test_ai_interpret_rejects_admin_credentials(tmp_path):
+    client = make_client(tmp_path, ai_interpreter=FakePaymentInterpreter())
+
+    response = client.post(
+        "/v1/agent/interpret",
+        headers=ADMIN,
+        json={"purchase_text": "Buy tickets from shop-a for 25 USD"},
+    )
+
+    assert response.status_code == 403
+
+
+def test_ai_interpret_returns_safe_unavailable_response(tmp_path):
+    interpreter = FakePaymentInterpreter(error=AIUnavailableError("private detail"))
+    client = make_client(tmp_path, ai_interpreter=interpreter)
+    _, token = issue(client)
+
+    response = client.post(
+        "/v1/agent/interpret",
+        headers=bearer(token),
+        json={"purchase_text": "Buy tickets from shop-a for 25 USD"},
+    )
+
+    assert response.status_code == 503
+    assert "private detail" not in response.text
+
+
+def test_ai_interpret_without_configured_interpreter_returns_503(tmp_path):
+    client = make_client(tmp_path)
+    _, token = issue(client)
+
+    response = client.post(
+        "/v1/agent/interpret",
+        headers=bearer(token),
+        json={"purchase_text": "Buy tickets from shop-a for 25 USD"},
+    )
+
+    assert response.status_code == 503
+
+
+def test_ai_interpret_rejects_extra_request_fields(tmp_path):
+    client = make_client(tmp_path, ai_interpreter=FakePaymentInterpreter())
+    _, token = issue(client)
+
+    response = client.post(
+        "/v1/agent/interpret",
+        headers=bearer(token),
+        json={
+            "purchase_text": "Buy tickets from shop-a for 25 USD",
+            "execute_payment": True,
+        },
+    )
+
+    assert response.status_code == 422
+
+
+def test_ai_interpret_is_listed_in_openapi(client):
+    paths = client.get("/openapi.json").json()["paths"]
+    assert "/v1/agent/interpret" in paths

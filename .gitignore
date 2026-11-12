@@ -8,3 +8,26 @@ __pycache__/
 *.db
 *.sqlite3
 *.db-*
+# Frontend local secrets
+frontend/.env.local
+frontend/.env.*.local
+
+# Local environment and secrets
+.env.*
+!.env.example
+*.pem
+*.key
+
+# SQLite runtime files
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+
+# Runtime audit checkpoints
+audit-checkpoint*.json
+
+# Frontend build artifacts
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/dist/

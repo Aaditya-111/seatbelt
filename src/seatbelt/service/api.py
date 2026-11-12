@@ -36,6 +36,12 @@ from seatbelt.errors import (
     NotFoundError,
 )
 from seatbelt.mandate import Mandate
+from seatbelt.service.ai import (
+    AIOutputError,
+    AIUnavailableError,
+    OllamaPaymentInterpreter,
+    PaymentIntent,
+)
 from seatbelt.service.core import GuardService
 from seatbelt.service.schemas import (
     ApproveBody,
@@ -43,6 +49,7 @@ from seatbelt.service.schemas import (
     IssueMandateBody,
     MandateIssued,
     PaymentBody,
+    InterpretPaymentBody,
     RejectBody,
     RevokeResult,
 )
@@ -80,13 +87,18 @@ def _unauthorized(detail: str) -> HTTPException:
     return HTTPException(status_code=401, detail=detail, headers={"WWW-Authenticate": "Bearer"})
 
 
-def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
+def create_app(
+    service: GuardService,
+    admin_api_key: SecretStr,
+    ai_interpreter: OllamaPaymentInterpreter | None = None,
+) -> FastAPI:
     app = FastAPI(
         title="Seatbelt",
         version=__version__,
         description="A safety layer between AI agents and PayPal payments.",
     )
     app.state.service = service
+    app.state.ai_interpreter = ai_interpreter
 
     from seatbelt.service.request_limits import RequestBodyLimitMiddleware
 
@@ -103,6 +115,7 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
         ("POST", "/v1/mandates"): 10,
         ("POST", "/v1/payments"): 30,
         ("POST", "/v1/paypal/payments"): 30,
+        ("POST", "/v1/agent/interpret"): 10,
         ("POST", "/v1/paypal/webhook"): 60,
     }
 
@@ -249,6 +262,76 @@ def create_app(service: GuardService, admin_api_key: SecretStr) -> FastAPI:
             currency=body.currency,
             description=body.description,
         )
+
+    @app.post(
+        "/v1/agent/interpret",
+        response_model=PaymentIntent,
+        tags=["agent", "ai"],
+    )
+    async def interpret_payment_intent(
+        body: InterpretPaymentBody,
+        creds: Creds,
+    ) -> PaymentIntent:
+        if creds is None:
+            raise _unauthorized("mandate token required")
+        if is_admin(creds):
+            raise HTTPException(
+                status_code=403,
+                detail="This endpoint requires an agent mandate token.",
+            )
+
+        # Authenticate the mandate before spending local model resources.
+        mandate = service.authenticate_agent(creds.credentials)
+
+        interpreter = app.state.ai_interpreter
+        if interpreter is None:
+            raise HTTPException(
+                status_code=503,
+                detail="Local AI interpretation is not configured.",
+            )
+
+        try:
+            intent = await interpreter.interpret(body.purchase_text)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
+        except AIUnavailableError as exc:
+            raise HTTPException(
+                status_code=503,
+                detail="Local AI is unavailable. Make sure Ollama is running.",
+            ) from exc
+        except AIOutputError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Local AI returned an invalid payment proposal. Please retry.",
+            ) from exc
+
+        # Mandates contain canonical lowercase merchant identifiers.
+        # Never silently map a natural-language merchant name to another ID.
+        if intent.payee is not None:
+            normalized_payee = intent.payee.strip().lower()
+            if normalized_payee not in mandate.allowed_payees:
+                missing = set(intent.missing_fields)
+                missing.add("payee")
+                return PaymentIntent.model_validate({
+                    **intent.model_dump(),
+                    "status": "needs_clarification",
+                    "payee": None,
+                    "missing_fields": [
+                        field for field in ("payee", "amount", "currency")
+                        if field in missing
+                    ],
+                    "clarification_question": (
+                        "That merchant is not authorized by this mandate. "
+                        "Please specify a merchant ID permitted by your mandate."
+                    ),
+                })
+
+            intent = PaymentIntent.model_validate({
+                **intent.model_dump(),
+                "payee": normalized_payee,
+            })
+
+        return intent
 
     @app.post("/v1/paypal/webhook", tags=["paypal"])
     async def paypal_webhook(request: Request) -> JSONResponse:
